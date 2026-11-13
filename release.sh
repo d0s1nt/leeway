@@ -17,10 +17,13 @@ rm -rf dist && mkdir dist
 export SIGN_ID
 NO_LOCAL_ENV=1 BUNDLE_ID="${RELEASE_BUNDLE_ID:-app.llmusage.menubar}" APP="dist/LLM Usage.app" LAUNCH=0 ./build.sh
 ZIP="dist/LLM-Usage-$VERSION.zip"
-ditto -c -k --keepParent "dist/LLM Usage.app" "$ZIP"
+# No extended attributes or resource forks in the archive: nothing from the build machine travels with it.
+xattr -cr "dist/LLM Usage.app"
+ditto -c -k --norsrc --noextattr --keepParent "dist/LLM Usage.app" "$ZIP"
 if [ -n "$NOTARY_PROFILE" ]; then
   xcrun notarytool submit "$ZIP" --keychain-profile "$NOTARY_PROFILE" --wait
   xcrun stapler staple "dist/LLM Usage.app"
-  rm "$ZIP" && ditto -c -k --keepParent "dist/LLM Usage.app" "$ZIP"
+  rm "$ZIP" && ditto -c -k --norsrc --noextattr --keepParent "dist/LLM Usage.app" "$ZIP"
 fi
+./check-secrets.sh
 shasum -a 256 "$ZIP"

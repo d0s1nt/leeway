@@ -34,6 +34,11 @@ struct ProviderStatus {
 /// (Claude Code, Codex) a race with the tool itself can sign the user out of it. With this off the app is
 /// strictly read-only and asks the user to open the tool, which renews its own sign-in.
 var allowTokenRefresh: Bool { UserDefaults.standard.bool(forKey: "refreshTokens") }
+/// "Show Remaining": display what's left instead of what's used, the way the vendors' own screens count down.
+/// Only the wording, numbers and bar direction change; colours still warn as the allowance runs out.
+var showRemaining: Bool { UserDefaults.standard.bool(forKey: "showRemaining") }
+func shownPercent(_ used: Double) -> Double { showRemaining ? max(0, 100 - used) : used }
+var percentWord: String { showRemaining ? "left" : "used" }
 let refreshHint = "or turn on \u{201C}Renew Expired Sign-ins\u{201D} in this menu"
 
 /// Finds a command-line tool wherever it was installed. A menu bar app started by launchd gets a bare PATH,
@@ -336,7 +341,9 @@ struct CodexProvider: Provider {
                                   headers: ["Authorization": "Bearer \(access)", "ChatGPT-Account-Id": acct, "User-Agent": "codex-cli"])
             guard c == 200 else { throw HTTPError.status(c, String(decoding: d, as: UTF8.self)) }
             let o = try json(d)
-            st.plan = (o["plan_type"] as? String)?.capitalized
+            // The endpoint's internal plan names don't all match what ChatGPT calls them.
+            let planNames = ["prolite": "Pro 100", "pro": "Pro", "plus": "Plus", "free": "Free", "team": "Team", "business": "Business", "enterprise": "Enterprise", "edu": "Edu", "go": "Go"]
+            st.plan = (o["plan_type"] as? String).map { planNames[$0.lowercased()] ?? $0.capitalized }
             // Which ChatGPT account the CLI is signed into matters when the numbers look wrong.
             if let email = o["email"] as? String, !email.isEmpty { st.plan = [st.plan, email].compactMap { $0 }.joined(separator: " · ") }
             if let rl = o["rate_limit"] as? [String: Any] {
@@ -902,7 +909,7 @@ final class HeaderRowView: LinkRowView {
         } else if status.error != nil {
             right = NSAttributedString(string: "⚠︎ needs attention", attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.systemOrange])
         } else if let h = status.headline {
-            right = NSAttributedString(string: String(format: "%.0f%% used", h), attributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium), .foregroundColor: Brand.usage(h)])
+            right = NSAttributedString(string: String(format: "%.0f%% %@", shownPercent(h), percentWord), attributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium), .foregroundColor: Brand.usage(h)])
         } else {
             right = NSAttributedString(string: "no data", attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.tertiaryLabelColor])
         }
@@ -932,13 +939,14 @@ final class UsageRowView: NSView {
         NSColor.labelColor.withAlphaComponent(0.12).setFill()
         NSBezierPath(roundedRect: barRect, xRadius: 3, yRadius: 3).fill()
         let pct = max(0, min(100, usage.usedPercent))
-        var fill = barRect; fill.size.width = max(pct > 0 ? 6 : 0, barRect.width * CGFloat(pct / 100))
+        let shown = shownPercent(pct)
+        var fill = barRect; fill.size.width = max(shown > 0 ? 6 : 0, barRect.width * CGFloat(shown / 100))
         if fill.width > 0 {
             Brand.usage(pct).setFill()
             NSBezierPath(roundedRect: fill, xRadius: 3, yRadius: 3).fill()
         }
 
-        let pctStr = NSAttributedString(string: String(format: "%.0f%%", pct), attributes: num)
+        let pctStr = NSAttributedString(string: String(format: "%.0f%%", shown), attributes: num)
         pctStr.draw(at: NSPoint(x: rowInset + 254 + (36 - pctStr.size().width), y: 4))
 
         if let r = usage.resetsAt {
@@ -1068,7 +1076,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if let h = s.headline {
                 worst = max(worst, h)
                 let color: NSColor = h >= 90 ? .systemRed : (h >= 75 ? .systemOrange : .labelColor)
-                title.append(NSAttributedString(string: String(format: "%.0f", h), attributes: [.font: font, .foregroundColor: color]))
+                title.append(NSAttributedString(string: String(format: "%.0f", shownPercent(h)), attributes: [.font: font, .foregroundColor: color]))
             } else {
                 title.append(NSAttributedString(string: "!", attributes: [.font: font, .foregroundColor: NSColor.systemOrange]))
             }
@@ -1078,7 +1086,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         item.button?.image = NSImage(systemSymbolName: "gauge.with.dots.needle.bottom.\(step)percent", accessibilityDescription: "LLM usage")
             ?? NSImage(systemSymbolName: "gauge.with.needle", accessibilityDescription: "LLM usage")
         item.button?.toolTip = statuses.filter { $0.missing == nil }.map { s in
-            s.headline.map { String(format: "%@: %.0f%% used", s.name, $0) } ?? "\(s.name): no data"
+            s.headline.map { String(format: "%@: %.0f%% %@", s.name, shownPercent($0), percentWord) } ?? "\(s.name): no data"
         }.joined(separator: "\n")
 
         logPlacement()
@@ -1159,6 +1167,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         c.state = compact ? .on : .off
         c.toolTip = "Show only the provider closest to its limit, so the item fits beside the notch"
         menu.addItem(c)
+        let sr = NSMenuItem(title: "Show Remaining", action: #selector(toggleRemaining), keyEquivalent: "")
+        sr.target = self
+        sr.state = showRemaining ? .on : .off
+        sr.toolTip = "Show what's left instead of what's used, like the vendors' own usage screens"
+        menu.addItem(sr)
         let rt = NSMenuItem(title: "Renew Expired Sign-ins", action: #selector(toggleRefresh), keyEquivalent: "")
         rt.target = self
         rt.state = allowTokenRefresh ? .on : .off
@@ -1210,6 +1223,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         a.addButton(withTitle: "OK")
         NSApp.activate(ignoringOtherApps: true)
         a.runModal()
+    }
+
+    @objc func toggleRemaining() {
+        UserDefaults.standard.set(!showRemaining, forKey: "showRemaining")
+        updateTitle(); rebuildMenu()
     }
 
     @objc func toggleRefresh() {

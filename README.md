@@ -48,6 +48,8 @@ The dropdown has these controls:
 
 - **Launch at Login** also relaunches the app if it ever crashes.
 - **Compact Menu Bar** (on by default) shows one provider. Turn it off to show all.
+- **Show Remaining** flips every number and bar from "used" to "left", matching how
+  the vendors' own usage screens count down.
 - **Renew Expired Sign-ins** (off by default), see below.
 - **Refresh Now**.
 - **Setup Check** shows which tools were found on this Mac and why any are missing.
@@ -134,6 +136,12 @@ without a warning on any Mac, sign and notarize with an Apple Developer ID:
 version comes from `VERSION`.
 
 ## Notes for contributors
+
+- Run `./check-secrets.sh` before pushing, or `./check-secrets.sh --install` once to make
+  it a pre-push hook. It scans tracked files, the whole git history and any built
+  release for token shapes, home paths, email addresses and account ids. `release.sh`
+  runs it too. Never paste real tokens, `auth.json` contents or debug output into
+  code, tests, issues or commits.
 
 - Everything is in `LLMUsage.swift`. A provider is a struct with `name`, a one-letter
   `short`, and `fetch()` returning a `ProviderStatus`; add it to `allProviders` and
