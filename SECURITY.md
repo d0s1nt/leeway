@@ -1,6 +1,6 @@
 # Security
 
-LLM Usage reads sign-in tokens that other tools keep on your Mac, so security
+Leeway reads sign-in tokens that other tools keep on your Mac, so security
 reports are taken seriously.
 
 ## Reporting a vulnerability

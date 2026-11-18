@@ -1,4 +1,4 @@
-// LLM Usage — a macOS menu bar app showing rate-limit usage for the LLM
+// Leeway — a macOS menu bar app showing rate-limit usage for the LLM
 // accounts signed in on this Mac (Claude Code, Codex, Gemini CLI, Grok).
 // Build: ./build.sh   (single file, no Xcode project needed)
 
@@ -135,7 +135,7 @@ func httpFull(_ urlString: String, method: String = "GET", headers: [String: Str
 
 func json(_ data: Data) throws -> [String: Any] {
     guard let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw HTTPError.badJSON }
-    if ProcessInfo.processInfo.environment["LLMUSAGE_DEBUG"] != nil { debugShape(o) }
+    if ProcessInfo.processInfo.environment["LEEWAY_DEBUG"] != nil { debugShape(o) }
     return o
 }
 
@@ -203,7 +203,18 @@ func run(_ cmd: String, _ args: [String], timeout: TimeInterval = 30) -> (Int32,
 func home(_ rel: String) -> String { NSHomeDirectory() + "/" + rel }
 /// Set in Info.plist by build.sh (BUNDLE_ID); also the launchd label, defaults domain and snapshot folder.
 /// Defined up here on purpose: this file runs top to bottom, and a global used before its line has run crashes.
-let bundleID = Bundle.main.bundleIdentifier ?? "llm-usage"
+let bundleID = Bundle.main.bundleIdentifier ?? "leeway"
+
+// Every other top-level constant that a command-line handler can reach lives here too. Top-level code in this file
+// runs in order, so a handler that touches a constant declared further down reads it uninitialised and crashes.
+let productName = "Leeway"
+let mcpServerName = "leeway"
+let projectRepo = "d0s1nt/leeway"
+let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "dev"
+/// Display order in the menu bar and the dropdown.
+let allProviders: [Provider] = [ClaudeProvider(), CodexProvider(), GeminiProvider(), GrokProvider(), GrokBotProvider(), MuseProvider()]
+let menuWidth: CGFloat = 380
+let rowInset: CGFloat = 14
 extension String { var nilIfEmpty: String? { isEmpty ? nil : self } }
 
 func jwtExpiry(_ token: String) -> Date? {
@@ -420,7 +431,7 @@ struct GeminiProvider: Provider {
                 if let inel = (load["ineligibleTiers"] as? [[String: Any]])?.first, let code = inel["reasonCode"] as? String {
                     if code == "RESTRICTED_DASHER_USER" {
                         st.plan = "Workspace account"
-                        st.note = "Quota needs a Google Cloud project: add GOOGLE_CLOUD_PROJECT=<id> to ~/.gemini/.env. Click for setup docs."
+                        st.note = "Needs a Google Cloud project: add GOOGLE_CLOUD_PROJECT=<id> to ~/.gemini/.env. Click for setup docs."
                         st.link = URL(string: "https://github.com/google-gemini/gemini-cli/blob/main/docs/get-started/authentication.md")
                     } else {
                         st.note = "Not eligible (\(code)); quota unavailable"
@@ -579,7 +590,7 @@ struct GrokProvider: Provider {
 
         let caps: [String: Any] = ["fs": ["readTextFile": false, "writeTextFile": false], "terminal": false]
         guard client.call("initialize", ["protocolVersion": 1, "clientCapabilities": caps,
-                                         "_meta": ["clientType": "llm-usage-menubar", "clientVersion": "1.0"]]) != nil else {
+                                         "_meta": ["clientType": "leeway-menubar", "clientVersion": "1.0"]]) != nil else {
             st.error = "grok agent didn't answer initialize"; return st
         }
         guard let auth = client.call("authenticate", ["methodId": "cached_token"]), auth["error"] == nil else {
@@ -622,13 +633,13 @@ struct MuseProvider: Provider {
                     st.note = "Quota exhausted — from Muse's last refused request (\(agoShort(seen)) ago)"
                     return st
                 } else {
-                    st.note = "Window reset \(absolute(reset)); Meta reports usage again after the next Muse prompt"
+                    st.note = "New window since \(absolute(reset)). Figures appear after your next Muse prompt."
                     return st
                 }
             }
             let reason = (o["reason"] as? String) ?? ""
             st.note = reason == "server_sent_no_usage"
-                ? "Power Usage currently unavailable — Meta only reports it after a prompt has run in the current window. Send one message in Muse, then refresh."
+                ? "Figures appear after your next Muse prompt; Meta only reports usage once a window has started."
                 : ((o["hint"] as? String) ?? "No usage data")
             return st
         }
@@ -690,13 +701,13 @@ struct GrokBotProvider: Provider {
         let running = !NSRunningApplication.runningApplications(withBundleIdentifier: "com.anysphere.sand").isEmpty
         let expires = (value["expiresAtMs"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) }
         if !running {
-            notes.append("Grok Bot isn't running — figures are from its last check \(agoShort(readAt)) ago and update when it's open")
+            notes.append("Grok Bot is closed; figures from \(agoShort(readAt)) ago")
             if Date().timeIntervalSince(readAt) > 3600 { st.staleSince = readAt }
         } else if let e = expires, e < Date() {
             st.staleSince = readAt
-            notes.append("Grok Bot's cached reading has expired; it refreshes on its next use")
+            notes.append("Grok Bot's reading has expired; it updates on next use")
         } else {
-            notes.append("From Grok Bot's own cache, read \(agoShort(readAt)) ago")
+            notes.append("as of \(agoShort(readAt)) ago")
         }
         st.note = notes.joined(separator: " · ")
         return st
@@ -749,7 +760,7 @@ extension ClaudeProvider {
                 guard let n = r["display_name"] as? String, let p = r["percent"] as? Double, p > 0 else { return nil }
                 return "\(n) \(Int(p))%"
             }
-            if !parts.isEmpty { st.note = "This week by surface: " + parts.joined(separator: " · ") }
+            if parts.count > 1 { st.note = "This week: " + parts.joined(separator: " · ") }
         }
         if st.windows.isEmpty { st.note = "No limit windows reported" }
     }
@@ -832,7 +843,7 @@ extension GrokBotProvider {
         if let od = usage["onDemand"] as? [String: Any], let limit = od["limitCents"] as? Double, limit > 0 {
             let used = (od["usedCents"] as? Double) ?? 0
             st.windows.append(UsageWindow(label: "On-demand cap", usedPercent: min(used / limit * 100, 100), resetsAt: nil, headline: false))
-            notes.append(String(format: "On-demand spend $%.2f of a $%.2f cap", used / 100, limit / 100))
+            notes.append(String(format: "$%.2f of $%.2f on-demand", used / 100, limit / 100))
         }
         return notes
     }
@@ -878,8 +889,6 @@ extension MuseProvider {
 
 // MARK: - Menu rows (fixed width so long notes never stretch the menu)
 
-let menuWidth: CGFloat = 380
-let rowInset: CGFloat = 14
 
 enum Brand {
     static func color(_ short: String) -> NSColor {
@@ -960,7 +969,7 @@ final class HeaderRowView: LinkRowView {
         status = st
         super.init(frame: NSRect(x: 0, y: 0, width: menuWidth, height: 28))
         link = st.link
-        toolTip = st.link.map { "Open \($0.host ?? "usage page")" }
+        toolTip = [st.link.map { "Open \($0.host ?? "usage page")" }, st.account.map { "Signed in as \($0)" }].compactMap { $0 }.joined(separator: "\n").nilIfEmpty
         setAccessibilityElement(true)
         setAccessibilityRole(st.link == nil ? .staticText : .button)
         let figure = st.headline.map { String(format: "%.0f percent %@", shownPercent($0), percentWord) } ?? (st.error != nil ? "needs attention" : "no data")
@@ -981,15 +990,18 @@ final class HeaderRowView: LinkRowView {
         let name = NSAttributedString(string: status.name, attributes: [.font: NSFont.boldSystemFont(ofSize: 13), .foregroundColor: NSColor.labelColor])
         name.draw(at: NSPoint(x: rowInset + 21, y: 6))
         var x = rowInset + 21 + name.size().width + 7
-        if let plan = status.displayPlan {
-            let p = NSAttributedString(string: plan, attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor])
-            p.draw(at: NSPoint(x: x, y: 7)); x += p.size().width
+        if let plan = status.plan {
+            let para = NSMutableParagraphStyle(); para.lineBreakMode = .byTruncatingTail
+            let p = NSAttributedString(string: plan, attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor, .paragraphStyle: para])
+            p.draw(in: NSRect(x: x, y: 7, width: max(0, menuWidth - rowInset - 96 - x), height: 15)); x += p.size().width
         }
         let right: NSAttributedString
-        if let since = status.staleSince, status.error == nil {
+        if status.windows.isEmpty && status.error == nil {
+            right = NSAttributedString(string: "no figures yet", attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.tertiaryLabelColor])
+        } else if let since = status.staleSince, status.error == nil {
             right = NSAttributedString(string: "stale · \(relative(Date().addingTimeInterval(Date().timeIntervalSince(since)))) old".replacingOccurrences(of: "now old", with: "just now"), attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.systemOrange])
         } else if status.error != nil {
-            right = NSAttributedString(string: "⚠︎ needs attention", attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.systemOrange])
+            right = NSAttributedString(string: "needs attention", attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.systemOrange])
         } else if let h = status.headline {
             right = NSAttributedString(string: String(format: "%.0f%% %@", shownPercent(h), percentWord), attributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium), .foregroundColor: Brand.usage(h)])
         } else {
@@ -1018,9 +1030,12 @@ final class UsageRowView: NSView {
         let num: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium), .foregroundColor: NSColor.labelColor]
         let dim: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular), .foregroundColor: NSColor.secondaryLabelColor]
 
-        (usage.label as NSString).draw(in: NSRect(x: rowInset + 21, y: 4, width: 111, height: 16), withAttributes: label)
+        // Columns: label | bar | percentage (right-aligned) | reset (right-aligned). Fixed, so nothing collides.
+        let para = NSMutableParagraphStyle(); para.lineBreakMode = .byTruncatingTail
+        var labelAttrs = label; labelAttrs[.paragraphStyle] = para
+        (usage.label as NSString).draw(in: NSRect(x: rowInset + 21, y: 4, width: 108, height: 16), withAttributes: labelAttrs)
 
-        let barRect = NSRect(x: rowInset + 136, y: 9, width: 110, height: 6)
+        let barRect = NSRect(x: rowInset + 133, y: 9, width: 96, height: 6)
         NSColor.labelColor.withAlphaComponent(0.12).setFill()
         NSBezierPath(roundedRect: barRect, xRadius: 3, yRadius: 3).fill()
         let pct = max(0, min(100, usage.usedPercent))
@@ -1031,8 +1046,10 @@ final class UsageRowView: NSView {
             NSBezierPath(roundedRect: fill, xRadius: 3, yRadius: 3).fill()
         }
 
-        let pctStr = NSAttributedString(string: String(format: "%.0f%%", shown), attributes: num)
-        pctStr.draw(at: NSPoint(x: rowInset + 254 + (36 - pctStr.size().width), y: 4))
+        var numAttrs = num
+        if pct >= 90 { numAttrs[.foregroundColor] = NSColor.systemRed } else if pct >= 75 { numAttrs[.foregroundColor] = NSColor.systemOrange }
+        let pctStr = NSAttributedString(string: String(format: "%.0f%%", shown), attributes: numAttrs)
+        pctStr.draw(at: NSPoint(x: rowInset + 276 - pctStr.size().width, y: 4))
 
         if let r = usage.resetsAt {
             let t = NSAttributedString(string: Self.resetText(r), attributes: dim)
@@ -1044,14 +1061,19 @@ final class UsageRowView: NSView {
 final class NoteRowView: LinkRowView {
     let text: NSAttributedString
     let textRect: NSRect
-    init(_ note: String, color: NSColor = .secondaryLabelColor, link: URL? = nil) {
+    init(_ note: String, color: NSColor = .secondaryLabelColor, link: URL? = nil, maxLines: Int = 0) {
+        let font = NSFont.systemFont(ofSize: 11)
         let para = NSMutableParagraphStyle(); para.lineBreakMode = .byWordWrapping
-        text = NSAttributedString(string: note, attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: color, .paragraphStyle: para])
+        text = NSAttributedString(string: note, attributes: [.font: font, .foregroundColor: color, .paragraphStyle: para])
         let width = menuWidth - rowInset * 2 - 21
-        let h = ceil(text.boundingRect(with: NSSize(width: width, height: 200), options: [.usesLineFragmentOrigin, .usesFontLeading]).height)
-        textRect = NSRect(x: rowInset + 21, y: 4, width: width, height: h)
-        super.init(frame: NSRect(x: 0, y: 0, width: menuWidth, height: h + 8))
+        let full = ceil(text.boundingRect(with: NSSize(width: width, height: 400), options: [.usesLineFragmentOrigin, .usesFontLeading]).height)
+        let lineH = ceil(NSLayoutManager().defaultLineHeight(for: font))
+        let h = maxLines > 0 ? min(full, lineH * CGFloat(maxLines) + 2) : full
+        // A couple of points of slack: text that exactly fills its box can lose its last line to rounding.
+        textRect = NSRect(x: rowInset + 21, y: 2, width: width, height: h + 2)
+        super.init(frame: NSRect(x: 0, y: 0, width: menuWidth, height: h + 6))
         self.link = link
+        if h < full { toolTip = note }
         setAccessibilityElement(true)
         setAccessibilityRole(link == nil ? .staticText : .link)
         setAccessibilityLabel(note)
@@ -1062,7 +1084,7 @@ final class NoteRowView: LinkRowView {
             NSColor.labelColor.withAlphaComponent(0.06).setFill()
             NSBezierPath(roundedRect: bounds.insetBy(dx: 6, dy: 1), xRadius: 5, yRadius: 5).fill()
         }
-        text.draw(with: textRect, options: [.usesLineFragmentOrigin, .usesFontLeading])
+        text.draw(with: textRect, options: [.usesLineFragmentOrigin, .usesFontLeading, .truncatesLastVisibleLine])
     }
 }
 
@@ -1080,7 +1102,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ n: Notification) {
         item.autosaveName = statusAutosaveName
-        item.button?.image = NSImage(systemSymbolName: "gauge.with.needle", accessibilityDescription: "LLM usage")
+        item.button?.image = NSImage(systemSymbolName: "gauge.with.needle", accessibilityDescription: "Leeway")
         item.button?.imagePosition = .imageLeading
         item.button?.title = "…"
         menu.delegate = self
@@ -1173,9 +1195,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         item.button?.attributedTitle = title.length > 0 ? title : NSAttributedString(string: "LLM")
         let step = worst >= 90 ? "100" : worst >= 67 ? "67" : worst >= 33 ? "50" : worst > 0 ? "33" : "0"
-        item.button?.image = NSImage(systemSymbolName: "gauge.with.dots.needle.bottom.\(step)percent", accessibilityDescription: "LLM usage")
-            ?? NSImage(systemSymbolName: "gauge.with.needle", accessibilityDescription: "LLM usage")
-        item.button?.setAccessibilityLabel("LLM Usage: " + (statuses.filter { $0.missing == nil && $0.headline != nil }
+        item.button?.image = NSImage(systemSymbolName: "gauge.with.dots.needle.bottom.\(step)percent", accessibilityDescription: "Leeway")
+            ?? NSImage(systemSymbolName: "gauge.with.needle", accessibilityDescription: "Leeway")
+        item.button?.setAccessibilityLabel("Leeway: " + (statuses.filter { $0.missing == nil && $0.headline != nil }
             .map { String(format: "%@ %.0f percent %@", $0.name, shownPercent($0.headline!), percentWord) }.joined(separator: ", ")))
         item.button?.toolTip = statuses.filter { $0.missing == nil }.map { s in
             s.headline.map { String(format: "%@: %.0f%% %@", s.name, shownPercent($0), percentWord) } ?? "\(s.name): no data"
@@ -1184,7 +1206,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         logPlacement()
     }
 
-    /// Writes where macOS put the status item to ~/Library/Logs/LLMUsage.log, for diagnosing a hidden item.
+    /// Writes where macOS put the status item to ~/Library/Logs/Leeway.log, for diagnosing a hidden item.
     var lastPlacement = ""
     func logPlacement() {
         let sig = "\(item.isVisible)|\(item.button?.window?.frame ?? .zero)|\(item.button?.window?.occlusionState.contains(.visible) ?? false)|\(NSScreen.screens.map(\.frame))"
@@ -1204,11 +1226,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         appendLog(lines.joined(separator: "\n") + "\n")
     }
 
-    /// Appends to ~/Library/Logs/LLMUsage.log. Diagnostics must never take the app down: only the throwing
+    /// Appends to ~/Library/Logs/Leeway.log. Diagnostics must never take the app down: only the throwing
     /// FileHandle APIs are used (the legacy ones raise ObjC exceptions Swift can't catch — that crashed us once),
     /// every failure is swallowed, and the file is trimmed when it passes ~256 KB.
     func appendLog(_ text: String) {
-        let path = home("Library/Logs/LLMUsage.log")
+        let path = home("Library/Logs/Leeway.log")
         let fm = FileManager.default
         guard let data = text.data(using: .utf8) else { return }
         do {
@@ -1233,59 +1255,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         let missing = statuses.filter { $0.missing != nil }
         if !statuses.isEmpty && missing.count == statuses.count {
-            let mi = NSMenuItem(); mi.view = NoteRowView("None of the supported AI tools are set up on this Mac yet. Choose Setup Check below to see what LLM Usage looks for."); menu.addItem(mi)
+            let mi = NSMenuItem(); mi.view = NoteRowView("None of the supported AI tools are set up on this Mac yet. Settings › Setup Check shows what Leeway looks for."); menu.addItem(mi)
             menu.addItem(.separator())
         }
-        for s in statuses where s.missing == nil {
+        // Providers with figures first, then the ones still waiting on something, kept to a line or two each.
+        let shown = statuses.filter { $0.missing == nil }
+        for s in shown.filter({ !$0.windows.isEmpty }) + shown.filter({ $0.windows.isEmpty }) {
             let header = NSMenuItem(); header.view = HeaderRowView(s); menu.addItem(header)
             for w in s.windows { let mi = NSMenuItem(); mi.view = UsageRowView(w); menu.addItem(mi) }
-            if let e = s.error { let mi = NSMenuItem(); mi.view = NoteRowView("⚠︎ " + e, color: .systemOrange, link: s.link); menu.addItem(mi) }
-            if let n = s.note { let mi = NSMenuItem(); mi.view = NoteRowView(n, link: s.link); menu.addItem(mi) }
+            if let e = s.error { let mi = NSMenuItem(); mi.view = NoteRowView(e, color: .systemOrange, link: s.link, maxLines: 2); menu.addItem(mi) }
+            if let n = s.note { let mi = NSMenuItem(); mi.view = NoteRowView(n, link: s.link, maxLines: 2); menu.addItem(mi) }
             menu.addItem(.separator())
         }
-        let u = NSMenuItem(title: refreshing ? "Refreshing…" : (lastUpdate.map { "Updated \(agoText($0))" } ?? "Not updated yet"), action: nil, keyEquivalent: "")
-        u.isEnabled = false
-        menu.addItem(u)
+
         let r = NSMenuItem(title: "Refresh Now", action: #selector(refresh), keyEquivalent: "r")
         r.target = self
+        let when = refreshing ? "refreshing…" : (lastUpdate.map { "updated \(agoText($0))" } ?? "")
+        let rt = NSMutableAttributedString(string: "Refresh Now", attributes: [.font: NSFont.menuFont(ofSize: 0)])
+        if !when.isEmpty { rt.append(NSAttributedString(string: "   " + when, attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor])) }
+        r.attributedTitle = rt
         menu.addItem(r)
-        let setup = NSMenuItem(title: missing.isEmpty ? "Setup Check…" : "Setup Check… (\(missing.count) not set up)", action: #selector(showSetup), keyEquivalent: "")
-        setup.target = self
-        setup.toolTip = missing.isEmpty ? "What LLM Usage found on this Mac" : "Not set up: " + missing.map(\.name).joined(separator: ", ")
-        menu.addItem(setup)
-        let login = NSMenuItem(title: "Launch at Login", action: #selector(toggleLogin), keyEquivalent: "")
-        login.toolTip = "Starts at login and relaunches automatically if it ever crashes"
-        login.target = self
-        login.state = LoginAgent.isEnabled ? .on : .off
-        menu.addItem(login)
-        let c = NSMenuItem(title: "Compact Menu Bar", action: #selector(toggleCompact), keyEquivalent: "")
-        c.target = self
-        c.state = compact ? .on : .off
-        c.toolTip = "Show only the provider closest to its limit, so the item fits beside the notch"
-        menu.addItem(c)
-        let sr = NSMenuItem(title: "Show Remaining", action: #selector(toggleRemaining), keyEquivalent: "")
-        sr.target = self
-        sr.state = showRemaining ? .on : .off
-        sr.toolTip = "Show what's left instead of what's used, like the vendors' own usage screens"
-        menu.addItem(sr)
-        let rt = NSMenuItem(title: "Renew Expired Sign-ins", action: #selector(toggleRefresh), keyEquivalent: "")
-        rt.target = self
-        rt.state = allowTokenRefresh ? .on : .off
-        rt.toolTip = "Off: read-only. On: renews Claude Code and Codex sign-ins when they expire and saves them back"
-        menu.addItem(rt)
+
+        let settings = NSMenu(title: "Settings")
+        func toggle(_ title: String, _ sel: Selector, _ on: Bool, _ tip: String) {
+            let i = NSMenuItem(title: title, action: sel, keyEquivalent: ""); i.target = self; i.state = on ? .on : .off; i.toolTip = tip
+            settings.addItem(i)
+        }
+        toggle("Launch at Login", #selector(toggleLogin), LoginAgent.isEnabled, "Starts at login and relaunches automatically if it ever crashes")
+        toggle("Compact Menu Bar", #selector(toggleCompact), compact, "Show only the provider closest to its limit, so the item fits beside the notch")
+        toggle("Show Remaining", #selector(toggleRemaining), showRemaining, "Show what's left instead of what's used, like the vendors' own usage screens")
+        toggle("Renew Expired Sign-ins", #selector(toggleRefresh), allowTokenRefresh, "Off: read-only. On: renews Claude Code and Codex sign-ins when they expire and saves them back")
+        settings.addItem(.separator())
+        func action(_ title: String, _ sel: Selector, _ tip: String) {
+            let i = NSMenuItem(title: title, action: sel, keyEquivalent: ""); i.target = self; i.toolTip = tip
+            settings.addItem(i)
+        }
+        action("Connect AI Tools…", #selector(connectTools), "Let Grok Bot, Claude Code, Codex, Grok and other agents ask how much allowance is left")
+        action(missing.isEmpty ? "Setup Check…" : "Setup Check… (\(missing.count) not set up)", #selector(showSetup),
+               missing.isEmpty ? "What Leeway found on this Mac" : "Not set up: " + missing.map(\.name).joined(separator: ", "))
+        action("Check for Updates…", #selector(checkForUpdates), "Asks GitHub for the latest release. Leeway never checks on its own.")
+        let si = NSMenuItem(title: "Settings", action: nil, keyEquivalent: ""); si.submenu = settings
+        menu.addItem(si)
         menu.addItem(.separator())
-        let connect = NSMenuItem(title: "Connect AI Tools…", action: #selector(connectTools), keyEquivalent: "")
-        connect.target = self
-        connect.toolTip = "Let Grok Bot, Claude Code, Codex, Grok and other agents ask how much allowance is left"
-        menu.addItem(connect)
-        let about = NSMenuItem(title: "About LLM Usage", action: #selector(showAbout), keyEquivalent: "")
+        let about = NSMenuItem(title: "About Leeway", action: #selector(showAbout), keyEquivalent: "")
         about.target = self
         menu.addItem(about)
-        let upd = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "")
-        upd.target = self
-        upd.toolTip = "Asks GitHub for the latest release. The app never checks on its own."
-        menu.addItem(upd)
-        menu.addItem(NSMenuItem(title: "Quit LLM Usage", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        menu.addItem(NSMenuItem(title: "Quit Leeway", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
     }
 
     func agoText(_ d: Date) -> String {
@@ -1318,14 +1333,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let found = statuses.filter { $0.missing == nil }.count
         lines.append("")
         lines.append(found == 0
-            ? "LLM Usage shows usage for AI coding tools that are signed in on this Mac. Set one up, then choose Refresh Now."
-            : "Tools that aren't set up are left out of the menu. LLM Usage only reads what these tools already keep on this Mac; by default it changes nothing.")
+            ? "Leeway shows usage for AI coding tools that are signed in on this Mac. Set one up, then choose Refresh Now."
+            : "Tools that aren't set up are left out of the menu. Leeway only reads what these tools already keep on this Mac; by default it changes nothing.")
         return lines.joined(separator: "\n")
     }
 
     @objc func showSetup() {
         let a = NSAlert()
-        a.messageText = "LLM Usage setup check"
+        a.messageText = "Leeway setup check"
         a.informativeText = statuses.isEmpty ? "Still loading. Try again in a few seconds." : Self.setupReport(statuses)
         a.addButton(withTitle: "OK")
         NSApp.activate(ignoringOtherApps: true)
@@ -1336,7 +1351,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// settings on the clipboard for apps configured by hand (Grok Bot, Cursor).
     @objc func connectTools() {
         if let why = LoginAgent.unsuitableLocation {
-            let a = NSAlert(); a.messageText = "Move LLM Usage to Applications first"
+            let a = NSAlert(); a.messageText = "Move Leeway to Applications first"
             a.informativeText = why + " AI tools need a permanent path to it."
             NSApp.activate(ignoringOtherApps: true); a.runModal(); return
         }
@@ -1350,7 +1365,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let a = NSAlert()
         a.messageText = "Connect AI tools"
         a.informativeText = """
-        AI agents can ask LLM Usage how much allowance each tool has left, through MCP. Read-only; agents never see your account email.
+        AI agents can ask Leeway how much allowance each tool has left, through MCP. Read-only; agents never see your account email.
 
         \(found.isEmpty ? "No agent command-line tools were found to add it to automatically." : "Add to: " + found.map(\.0).joined(separator: ", ") + ", using each tool's own mcp add command.")
 
@@ -1387,7 +1402,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         credits.append(NSAttributedString(string: "github.com/\(projectRepo)", attributes: [.font: NSFont.systemFont(ofSize: 11), .link: URL(string: "https://github.com/\(projectRepo)")!]))
         credits.append(NSAttributedString(string: "\nMIT licence. Logos belong to their owners.", attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor]))
         NSApp.activate(ignoringOtherApps: true)
-        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "LLM Usage", .applicationVersion: appVersion, .version: "", .credits: credits])
+        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Leeway", .applicationVersion: appVersion, .version: "", .credits: credits])
     }
 
     /// Manual only: one request to GitHub's public releases API when the user asks. Nothing is sent but the request.
@@ -1396,7 +1411,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             var latest: (version: String, url: URL)? = nil
             var failure: String? = nil
             do {
-                let (c, d) = try http("https://api.github.com/repos/\(projectRepo)/releases?per_page=10", headers: ["Accept": "application/vnd.github+json", "User-Agent": "LLM-Usage/\(appVersion)"])
+                let (c, d) = try http("https://api.github.com/repos/\(projectRepo)/releases?per_page=10", headers: ["Accept": "application/vnd.github+json", "User-Agent": "Leeway/\(appVersion)"])
                 guard c == 200, let list = try JSONSerialization.jsonObject(with: d) as? [[String: Any]] else { throw HTTPError.status(c, "GitHub didn't return a release list") }
                 let releases = list.filter { $0["draft"] as? Bool != true }.compactMap { r -> (String, URL)? in
                     guard let tag = r["tag_name"] as? String, let u = (r["html_url"] as? String).flatMap(URL.init(string:)) else { return nil }
@@ -1408,13 +1423,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let a = NSAlert()
                 if let f = failure { a.messageText = "Couldn't check for updates"; a.informativeText = f }
                 else if let l = latest, isNewer(l.version, than: appVersion) {
-                    a.messageText = "LLM Usage \(l.version) is available"
+                    a.messageText = "Leeway \(l.version) is available"
                     a.informativeText = "You have \(appVersion). The release page has the download and what changed."
                     a.addButton(withTitle: "Open Release Page"); a.addButton(withTitle: "Later")
                     NSApp.activate(ignoringOtherApps: true)
                     if a.runModal() == .alertFirstButtonReturn { NSWorkspace.shared.open(l.url) }
                     return
-                } else { a.messageText = "You're up to date"; a.informativeText = "LLM Usage \(appVersion) is the latest version." }
+                } else { a.messageText = "You're up to date"; a.informativeText = "Leeway \(appVersion) is the latest version." }
                 NSApp.activate(ignoringOtherApps: true)
                 a.runModal()
             }
@@ -1430,7 +1445,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !allowTokenRefresh {
             let a = NSAlert()
             a.messageText = "Renew expired sign-ins?"
-            a.informativeText = "LLM Usage will renew Claude Code and Codex sign-ins when they expire, using each tool's own sign-in service, and save the new tokens where that tool keeps them. Those tokens are single-use, so if the tool renews at the same moment you may have to sign in to it again. Leave this off to keep LLM Usage strictly read-only."
+            a.informativeText = "Leeway will renew Claude Code and Codex sign-ins when they expire, using each tool's own sign-in service, and save the new tokens where that tool keeps them. Those tokens are single-use, so if the tool renews at the same moment you may have to sign in to it again. Leave this off to keep Leeway strictly read-only."
             a.addButton(withTitle: "Turn On"); a.addButton(withTitle: "Cancel")
             NSApp.activate(ignoringOtherApps: true)
             guard a.runModal() == .alertFirstButtonReturn else { return }
@@ -1463,8 +1478,6 @@ if let i = CommandLine.arguments.firstIndex(of: "--render-marks"), i + 1 < Comma
     exit(0)
 }
 
-let projectRepo = "d0s1nt/llm-usage"
-let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "dev"
 /// Numeric dotted-version comparison: "0.10.0" is newer than "0.9.2"; any pre-release suffix is ignored.
 func isNewer(_ a: String, than b: String) -> Bool {
     func parts(_ v: String) -> [Int] { v.split(separator: "-").first.map { $0.split(separator: ".").map { Int($0) ?? 0 } } ?? [] }
@@ -1544,19 +1557,24 @@ if let i = CommandLine.arguments.firstIndex(of: "--render-preview"), i + 1 < Com
     let day: TimeInterval = 86400
     func w(_ l: String, _ p: Double, _ d: Double?, headline: Bool = true) -> UsageWindow { UsageWindow(label: l, usedPercent: p, resetsAt: d.map { Date().addingTimeInterval($0 * day + 600) }, headline: headline) }
     let demo: [ProviderStatus] = [
-        ProviderStatus(name: "Claude", short: "C", plan: "Max", windows: [w("Weekly (all)", 46, 2.6), w("Weekly Opus", 18, 2.6)], note: "This week by surface: Claude Code 81% · Chats 19%"),
+        ProviderStatus(name: "Claude", short: "C", plan: "Max", windows: [w("Weekly (all)", 46, 2.6), w("Weekly Opus", 18, 2.6)], note: "This week: Claude Code 81% · Chats 19%"),
         ProviderStatus(name: "Codex", short: "X", plan: "Pro", windows: [w("Weekly limit", 31, 4.2)]),
         ProviderStatus(name: "Grok", short: "K", plan: "SuperGrok", windows: [w("Weekly limit", 12, 5.1)]),
         ProviderStatus(name: "Grok Bot", short: "B", plan: "Grok Bot Plan", windows: [w("Included usage", 27, 6.3), w("On-demand cap", 40, nil, headline: false)]),
         ProviderStatus(name: "Muse", short: "M", plan: "Muse Code Power Usage", windows: [w("Weekly", 64, 3.4), w("5-hour window", 92, 0.08, headline: false)]),
+        ProviderStatus(name: "Gemini", short: "G", plan: "Workspace account", note: "Needs a Google Cloud project: add GOOGLE_CLOUD_PROJECT=<id> to ~/.gemini/.env. Click for setup docs."),
     ]
+    // --live renders this Mac's real figures instead, for checking the layout; never commit that image.
+    let source = CommandLine.arguments.contains("--live") ? fetchAll().filter { $0.missing == nil } : demo
+    let ordered = source.filter { !$0.windows.isEmpty } + source.filter { $0.windows.isEmpty }
     let dark = CommandLine.arguments.contains("--dark")
     let appearance = NSAppearance(named: dark ? .darkAqua : .aqua)!
     var rows: [NSView] = []
-    for st in demo {
+    for st in ordered {
         rows.append(HeaderRowView(st))
         rows += st.windows.map { UsageRowView($0) as NSView }
-        if let n = st.note { rows.append(NoteRowView(n)) }
+        if let e = st.error { rows.append(NoteRowView(e, color: .systemOrange, maxLines: 2)) }
+        if let n = st.note { rows.append(NoteRowView(n, maxLines: 2)) }
         let sep = NSBox(frame: NSRect(x: 0, y: 0, width: menuWidth, height: 9)); sep.boxType = .custom; sep.borderWidth = 0; sep.fillColor = .clear
         let line = NSBox(frame: NSRect(x: rowInset, y: 4, width: menuWidth - rowInset * 2, height: 1)); line.boxType = .custom; line.borderWidth = 0; line.fillColor = .separatorColor
         sep.addSubview(line); rows.append(sep)
@@ -1586,8 +1604,6 @@ if let i = CommandLine.arguments.firstIndex(of: "--render-preview"), i + 1 < Com
 
 // MARK: - Machine-readable usage, for scripts and AI agents (--json, --mcp, and a snapshot file)
 
-let productName = "LLM Usage"
-let mcpServerName = "llm-usage"
 
 /// Every provider, fetched in parallel.
 func fetchAll() -> [ProviderStatus] {
@@ -1730,7 +1746,7 @@ enum MCPServer {
 
     /// Newline-delimited JSON-RPC on stdin/stdout. Nothing but protocol messages may go to stdout.
     static func serve() -> Never {
-        unsetenv("LLMUSAGE_DEBUG")
+        unsetenv("LEEWAY_DEBUG")
         var cache: (at: Date, data: Data)? = nil
         let load: () -> Data = {
             if let c = cache, Date().timeIntervalSince(c.at) < 60 { return c.data }
@@ -1754,15 +1770,13 @@ enum MCPServer {
         exit(0)
     }
 
-    static var executable: String { Bundle.main.executablePath ?? "LLMUsage" }
+    static var executable: String { Bundle.main.executablePath ?? "Leeway" }
     /// The settings other apps need, for pasting into tools that have no command for it (Grok Bot, Cursor and others).
     static var configJSON: String {
         text(["mcpServers": [mcpServerName: ["command": executable, "args": ["--mcp"]]]])
     }
 }
 
-/// Display order in the menu bar and the dropdown.
-let allProviders: [Provider] = [ClaudeProvider(), CodexProvider(), GeminiProvider(), GrokProvider(), GrokBotProvider(), MuseProvider()]
 
 // MARK: - Self-test: every parser against synthetic responses. No network, files or credentials; the fixtures
 // below are invented and must stay that way (check-secrets.sh scans them). Run with --selftest; CI runs it too.
@@ -1790,7 +1804,7 @@ enum SelfTest {
         check(c.windows.map(\.label) == ["Weekly (all)", "Weekly Opus", "5-hour"], "claude labels \(c.windows.map(\.label))")
         check(c.headline == 42, "claude headline ignores 5-hour: \(String(describing: c.headline))")
         check(c.windows.first?.resetsAt == iso("2030-01-02T03:04:05Z"), "claude reset date")
-        check(c.note == "This week by surface: Claude Code 70% · Chats 30%", "claude breakdown note: \(c.note ?? "nil")")
+        check(c.note == "This week: Claude Code 70% · Chats 30%", "claude breakdown note: \(c.note ?? "nil")")
         // Claude: legacy shape.
         var cl = blank("Claude")
         ClaudeProvider.parse(obj(#"{"five_hour":{"utilization":5},"seven_day":{"utilization":33.5}}"#), into: &cl)
@@ -1835,7 +1849,7 @@ enum SelfTest {
         let bn = GrokBotProvider.parse(usage: obj(#"{"percentUsed":27.3,"nextResetMs":1893456000000,"grokPlanLabel":"Grok Bot Plan","isSandTrial":true,"onDemand":{"usedCents":8006,"limitCents":8000}}"#), into: &b)
         check(b.plan == "Grok Bot Plan (trial)", "grokbot plan")
         check(b.headline == 27.3 && b.windows.last?.usedPercent == 100, "grokbot headline \(String(describing: b.headline))")
-        check(bn == ["On-demand spend $80.06 of a $80.00 cap"], "grokbot note \(bn)")
+        check(bn == ["$80.06 of $80.00 on-demand"], "grokbot note \(bn)")
 
         // Muse: undocumented shape; weekly is the headline, the 5-hour window is not.
         var m = blank("Muse")
@@ -1948,8 +1962,8 @@ enum LoginAgent {
     /// quarantined apps opened straight from Downloads to a random read-only path, and a disk image unmounts.
     static var unsuitableLocation: String? {
         let path = Bundle.main.bundlePath
-        if path.contains("/AppTranslocation/") { return "macOS is running LLM Usage from a temporary copy because it was opened where it was downloaded." }
-        if path.hasPrefix("/Volumes/") { return "LLM Usage is running from a disk image." }
+        if path.contains("/AppTranslocation/") { return "macOS is running Leeway from a temporary copy because it was opened where it was downloaded." }
+        if path.hasPrefix("/Volumes/") { return "Leeway is running from a disk image." }
         return nil
     }
     /// The executable the installed launch agent starts, if any.
@@ -1961,7 +1975,7 @@ enum LoginAgent {
 
     static func enable() throws {
         if let why = unsuitableLocation {
-            throw NSError(domain: "LoginAgent", code: 1, userInfo: [NSLocalizedDescriptionKey: why + " Move LLM Usage to your Applications folder, open it from there, then turn on Launch at Login."])
+            throw NSError(domain: "LoginAgent", code: 1, userInfo: [NSLocalizedDescriptionKey: why + " Move Leeway to your Applications folder, open it from there, then turn on Launch at Login."])
         }
         guard let exe = Bundle.main.executablePath else { return }
         let plist: [String: Any] = [
@@ -2031,7 +2045,7 @@ if !launchedByAgent && !headlessRun && LoginAgent.isEnabled {
     }
 }
 
-let statusAutosaveName = "LLMUsage"
+let statusAutosaveName = "Leeway"
 let positionKey = "NSStatusItem Preferred Position \(statusAutosaveName)"
 if UserDefaults.standard.object(forKey: positionKey) == nil { UserDefaults.standard.set(330, forKey: positionKey) }
 

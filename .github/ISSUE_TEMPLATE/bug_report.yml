@@ -9,8 +9,8 @@ body:
   - type: input
     id: version
     attributes:
-      label: LLM Usage version
-      description: About LLM Usage in the dropdown shows it.
+      label: Leeway version
+      description: About Leeway in the dropdown shows it.
       placeholder: "0.2.0"
     validations:
       required: true
@@ -38,5 +38,5 @@ body:
     id: setup
     attributes:
       label: Setup check output
-      description: 'Run `"/Applications/LLM Usage.app/Contents/MacOS/LLMUsage" --setup` and paste the result, with your email address removed.'
+      description: 'Run `"/Applications/Leeway.app/Contents/MacOS/Leeway" --setup` and paste the result, with your email address removed.'
       render: text

@@ -1,18 +1,18 @@
 #!/bin/zsh
-# Builds "LLM Usage.app" and (re)launches it.
+# Builds "Leeway.app" and (re)launches it.
 #
 #   ./build.sh                      build into ~/Applications and launch
-#   APP="dist/LLM Usage.app" LAUNCH=0 ./build.sh     build elsewhere, don't launch (see release.sh)
+#   APP="dist/Leeway.app" LAUNCH=0 ./build.sh     build elsewhere, don't launch (see release.sh)
 #
 # Optional settings, from the environment or a git-ignored .local.env file next to this script:
-#   BUNDLE_ID   bundle identifier; also the defaults domain and the launchd label   (default app.llmusage.menubar)
+#   BUNDLE_ID   bundle identifier; also the defaults domain and the launchd label   (default ai.cynaptix.leeway)
 #   SIGN_ID     codesign identity, e.g. "Developer ID Application: Name (TEAMID)"    (default "-", ad-hoc)
 set -e
 cd "$(dirname "$0")"
 [ -f .local.env ] && [ -z "$NO_LOCAL_ENV" ] && source ./.local.env
-BUNDLE_ID="${BUNDLE_ID:-app.llmusage.menubar}"
+BUNDLE_ID="${BUNDLE_ID:-ai.cynaptix.leeway}"
 SIGN_ID="${SIGN_ID:--}"
-APP="${APP:-$HOME/Applications/LLM Usage.app}"
+APP="${APP:-$HOME/Applications/Leeway.app}"
 LAUNCH="${LAUNCH:-1}"
 VERSION="$(cat VERSION)"
 
@@ -24,20 +24,20 @@ cp AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 # Universal binary: Apple Silicon and Intel, macOS 13+.
 TMP="$(mktemp -d)"
 for arch in arm64 x86_64; do
-  swiftc -O -target "$arch-apple-macos13.0" LLMUsage.swift -o "$TMP/LLMUsage-$arch" -framework AppKit
+  swiftc -O -target "$arch-apple-macos13.0" Leeway.swift -o "$TMP/Leeway-$arch" -framework AppKit
 done
-lipo -create "$TMP/LLMUsage-arm64" "$TMP/LLMUsage-x86_64" -output "$APP/Contents/MacOS/LLMUsage"
+lipo -create "$TMP/Leeway-arm64" "$TMP/Leeway-x86_64" -output "$APP/Contents/MacOS/Leeway"
 rm -rf "$TMP"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>CFBundleName</key><string>LLM Usage</string>
-  <key>CFBundleDisplayName</key><string>LLM Usage</string>
+  <key>CFBundleName</key><string>Leeway</string>
+  <key>CFBundleDisplayName</key><string>Leeway</string>
   <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
   <key>CFBundleVersion</key><string>$VERSION</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
-  <key>CFBundleExecutable</key><string>LLMUsage</string>
+  <key>CFBundleExecutable</key><string>Leeway</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>NSHumanReadableCopyright</key><string>© 2026 Cynaptix. MIT licence.</string>
   <key>CFBundlePackageType</key><string>APPL</string>
@@ -54,7 +54,7 @@ fi
 echo "Built: $APP ($BUNDLE_ID $VERSION)"
 [ "$LAUNCH" = "1" ] || exit 0
 
-pkill -x LLMUsage 2>/dev/null || true
+pkill -x Leeway 2>/dev/null || true
 sleep 1
 # With "Launch at Login" on, restart through launchd so the running copy is the keep-alive-managed one.
 if [ -f "$HOME/Library/LaunchAgents/$BUNDLE_ID.plist" ] && launchctl print "gui/$(id -u)/$BUNDLE_ID" >/dev/null 2>&1; then

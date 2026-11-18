@@ -23,19 +23,19 @@ jobs:
       - name: Self-test on this architecture
         run: |
           uname -m
-          "dist/LLM Usage.app/Contents/MacOS/LLMUsage" --selftest
+          "dist/Leeway.app/Contents/MacOS/Leeway" --selftest
       - name: Setup check on a machine with no AI tools
-        run: '"dist/LLM Usage.app/Contents/MacOS/LLMUsage" --setup'
+        run: '"dist/Leeway.app/Contents/MacOS/Leeway" --setup'
       - name: Every command-line flag exits cleanly
         run: |
-          BIN="dist/LLM Usage.app/Contents/MacOS/LLMUsage"
+          BIN="dist/Leeway.app/Contents/MacOS/Leeway"
           "$BIN" --login status
           "$BIN" --print
           "$BIN" --render-preview "$RUNNER_TEMP/preview.png"
           "$BIN" --render-icon "$RUNNER_TEMP/icon.iconset"
       - name: JSON output and an MCP session
         run: |
-          BIN="dist/LLM Usage.app/Contents/MacOS/LLMUsage"
+          BIN="dist/Leeway.app/Contents/MacOS/Leeway"
           "$BIN" --json | python3 -c 'import json,sys; d=json.load(sys.stdin); assert len(d["providers"]) == 6, d'
           printf '%s\n' \
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \

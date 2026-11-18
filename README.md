@@ -1,7 +1,7 @@
-# LLM Usage
+# Leeway
 
-[![CI](https://github.com/d0s1nt/llm-usage/actions/workflows/ci.yml/badge.svg)](https://github.com/d0s1nt/llm-usage/actions/workflows/ci.yml)
-[![Latest release](https://img.shields.io/github/v/release/d0s1nt/llm-usage)](https://github.com/d0s1nt/llm-usage/releases/latest)
+[![CI](https://github.com/d0s1nt/leeway/actions/workflows/ci.yml/badge.svg)](https://github.com/d0s1nt/leeway/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/d0s1nt/leeway)](https://github.com/d0s1nt/leeway/releases/latest)
 ![macOS 13+](https://img.shields.io/badge/macOS-13%2B-blue)
 [![MIT licence](https://img.shields.io/badge/licence-MIT-green)](LICENSE)
 
@@ -10,7 +10,7 @@ each AI coding tool signed in on your Mac.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/preview-dark.png">
-  <img src="docs/preview-light.png" width="380" alt="The LLM Usage dropdown, showing weekly usage bars for Claude, Codex, Grok, Grok Bot and Muse">
+  <img src="docs/preview-light.png" width="380" alt="The Leeway dropdown, showing weekly usage bars for Claude, Codex, Grok, Grok Bot and Muse">
 </picture>
 
 <sub>Illustrative figures.</sub>
@@ -35,14 +35,14 @@ was found and how to set up the rest.
 
 Needs macOS 13 or later, on Apple Silicon or Intel.
 
-1. Download the `.dmg` from the [latest release](https://github.com/d0s1nt/llm-usage/releases/latest).
-2. Open it and drag **LLM Usage** to **Applications**.
-3. In Applications, **right-click LLM Usage and choose Open**, then Open again.
+1. Download the `.dmg` from the [latest release](https://github.com/d0s1nt/leeway/releases/latest).
+2. Open it and drag **Leeway** to **Applications**.
+3. In Applications, **right-click Leeway and choose Open**, then Open again.
    This is needed once, because releases aren't yet notarized by Apple.
-4. Optional: in the dropdown, turn on **Launch at Login**.
+4. Optional: in the dropdown, choose **Settings › Launch at Login**.
 
 If macOS says the app "can't be opened", go to System Settings, Privacy & Security,
-and click **Open Anyway** next to LLM Usage.
+and click **Open Anyway** next to Leeway.
 
 <details>
 <summary>Verify a download</summary>
@@ -50,7 +50,7 @@ and click **Open Anyway** next to LLM Usage.
 Releases are built by GitHub Actions from the tagged commit, with a signed build
 provenance attestation. With the GitHub CLI:
 
-    gh attestation verify LLM-Usage-0.2.0.dmg --repo d0s1nt/llm-usage
+    gh attestation verify Leeway-0.2.0.dmg --repo d0s1nt/leeway
 
 `SHA256SUMS.txt` on each release lists the checksums.
 </details>
@@ -60,17 +60,18 @@ provenance attestation. With the GitHub CLI:
 
 Needs the Xcode command line tools (`xcode-select --install`).
 
-    git clone https://github.com/d0s1nt/llm-usage.git && cd llm-usage
+    git clone https://github.com/d0s1nt/leeway.git && cd leeway
     ./build.sh
 
-That compiles a universal app to `~/Applications/LLM Usage.app` and launches it.
+That compiles a universal app to `~/Applications/Leeway.app` and launches it.
 </details>
 
 ## Using it
 
 The menu bar shows a gauge plus the provider closest to its limit, as its logo and
 percentage. Orange from 75%, red from 90%. Click it for every provider, each limit
-window and when it resets. Click a provider's name to open its usage page. Figures
+window and when it resets. Click a provider's name to open its usage page; hover it
+to see which account is signed in. Tools still waiting on setup sit at the bottom. Figures
 refresh every 5 minutes and whenever you open the menu.
 
 The headline number is always the weekly or included allowance. Short windows and
@@ -78,14 +79,15 @@ spend caps appear as rows but don't drive it.
 
 | Menu item | What it does |
 |---|---|
-| Refresh Now | Fetches every provider again |
-| Setup Check… | Which tools were found on this Mac, and how to fix the rest |
-| Launch at Login | Starts at login, and relaunches the app if it ever crashes |
-| Compact Menu Bar | On by default: one provider in the menu bar. Off: all of them |
-| Show Remaining | Counts down what's left, like the vendors' own screens |
-| Renew Expired Sign-ins | Off by default. See below |
-| Connect AI Tools… | Lets Grok Bot, Claude Code, Codex, Grok and other agents query usage (below) |
-| About / Check for Updates… | Version, licence, and a manual check for a newer release |
+| Refresh Now | Fetches every provider again; shows when it last did |
+| Settings › Launch at Login | Starts at login, and relaunches Leeway if it ever crashes |
+| Settings › Compact Menu Bar | On by default: one provider in the menu bar. Off: all of them |
+| Settings › Show Remaining | Counts down what's left, like the vendors' own screens |
+| Settings › Renew Expired Sign-ins | Off by default. See below |
+| Settings › Connect AI Tools… | Lets Grok Bot, Claude Code, Codex, Grok and other agents query usage (below) |
+| Settings › Setup Check… | Which tools were found on this Mac, and how to fix the rest |
+| Settings › Check for Updates… | A manual check for a newer release |
+| About Leeway | Version and licence |
 
 ## Use it from AI agents
 
@@ -101,7 +103,7 @@ Agents never see your account email or any token. The server reuses the figures 
 menu bar app fetched in the last 10 minutes, so frequent questions don't hit vendor
 rate limits.
 
-**The easy way:** choose **Connect AI Tools…** in the dropdown. It adds the server to
+**The easy way:** choose **Settings › Connect AI Tools…** in the dropdown. It adds the server to
 Claude Code, Codex and the Grok CLI using each tool's own command, and copies the
 settings for apps you configure by hand.
 
@@ -110,19 +112,19 @@ settings for apps you configure by hand.
 
 | Field | Value |
 |---|---|
-| Name | `llm-usage` |
-| Command | `/Applications/LLM Usage.app/Contents/MacOS/LLMUsage` |
+| Name | `leeway` |
+| Command | `/Applications/Leeway.app/Contents/MacOS/Leeway` |
 | Arguments | `--mcp` |
 
 **By hand, from a terminal:**
 
-    BIN="/Applications/LLM Usage.app/Contents/MacOS/LLMUsage"
-    claude mcp add --scope user llm-usage -- "$BIN" --mcp
-    codex mcp add llm-usage -- "$BIN" --mcp
-    grok mcp add --scope user llm-usage "$BIN" -- --mcp
+    BIN="/Applications/Leeway.app/Contents/MacOS/Leeway"
+    claude mcp add --scope user leeway -- "$BIN" --mcp
+    codex mcp add leeway -- "$BIN" --mcp
+    grok mcp add --scope user leeway "$BIN" -- --mcp
 
 **Without MCP:** `"$BIN" --json` prints the same data, and the running app keeps it
-current in `~/Library/Application Support/app.llmusage.menubar/usage.json`, readable
+current in `~/Library/Application Support/ai.cynaptix.leeway/usage.json`, readable
 only by you.
 
 ## Privacy and what it touches
@@ -145,7 +147,7 @@ usage figures and plan names only. The only other network request
 is **Check for Updates…**, which asks GitHub's public API for the release list, and
 only when you choose it.
 
-It writes its own preferences, the usage snapshot described above, a small log at `~/Library/Logs/LLMUsage.log` (where
+It writes its own preferences, the usage snapshot described above, a small log at `~/Library/Logs/Leeway.log` (where
 the menu bar item is placed, only when that changes), and a launch agent in
 `~/Library/LaunchAgents` if you turn on Launch at Login.
 
@@ -154,7 +156,7 @@ the menu bar item is placed, only when that changes), and a launch agent in
 Claude Code and Codex sign-ins expire, and each tool renews its own when you use it.
 If a row says its sign-in has expired, run that tool once.
 
-Turning on **Renew Expired Sign-ins** lets LLM Usage do the renewal itself, using the
+Turning on **Renew Expired Sign-ins** lets Leeway do the renewal itself, using the
 tool's own sign-in service, and save the new tokens where the tool keeps them. That
 keeps rows fresh for tools you haven't used in a while. The cost: those tokens are
 single-use, so if the tool renews at the same moment, you may have to sign in to it
@@ -168,8 +170,8 @@ underlying token, and the Gemini CLI's file is only updated when the switch is o
 
 **The icon isn't in the menu bar.** On a MacBook, macOS hides menu bar items that
 would sit under the notch. Hold ⌘ and drag the icon to the right; macOS remembers
-the spot. The log at `~/Library/Logs/LLMUsage.log` records the item's position and
-whether it's hidden. If the app isn't running at all, look for `LLMUsage-*.ips` in
+the spot. The log at `~/Library/Logs/Leeway.log` records the item's position and
+whether it's hidden. If the app isn't running at all, look for `Leeway-*.ips` in
 `~/Library/Logs/DiagnosticReports`.
 
 **A tool you have isn't detected.** Command-line tools are looked for on your login
@@ -192,7 +194,7 @@ run in the current window. Send one message in Muse.
 
 **From a terminal**, using the app's own binary:
 
-    BIN="/Applications/LLM Usage.app/Contents/MacOS/LLMUsage"
+    BIN="/Applications/Leeway.app/Contents/MacOS/Leeway"
     "$BIN" --setup          # the Setup Check report as text
     "$BIN" --print          # every provider's figures
     "$BIN" --print C X      # only some providers, by letter or name
@@ -205,24 +207,24 @@ address from it first.
 
 ## Uninstall
 
-1. In the dropdown, turn off **Launch at Login**, then Quit.
-2. Delete `LLM Usage.app` from Applications.
+1. In the dropdown, turn off **Settings › Launch at Login**, then Quit.
+2. Delete `Leeway.app` from Applications.
 3. Optionally remove its settings and log:
 
-       defaults delete app.llmusage.menubar
-       rm -f ~/Library/Logs/LLMUsage.log ~/Library/LaunchAgents/app.llmusage.menubar.plist
-       rm -rf ~/Library/Application\ Support/app.llmusage.menubar
+       defaults delete ai.cynaptix.leeway
+       rm -f ~/Library/Logs/Leeway.log ~/Library/LaunchAgents/ai.cynaptix.leeway.plist
+       rm -rf ~/Library/Application\ Support/ai.cynaptix.leeway
 
 4. If you connected AI tools, remove it from each, for example
-   `claude mcp remove llm-usage`, `codex mcp remove llm-usage` or
-   `grok mcp remove llm-usage`, and delete it from Grok Bot's MCP settings.
+   `claude mcp remove leeway`, `codex mcp remove leeway` or
+   `grok mcp remove leeway`, and delete it from Grok Bot's MCP settings.
 
 It never changed anything belonging to the AI tools, unless you turned on Renew
 Expired Sign-ins.
 
 ## Contributing
 
-- Everything is in `LLMUsage.swift`. A provider is a struct with a `name`, a
+- Everything is in `Leeway.swift`. A provider is a struct with a `name`, a
   one-letter `short` and a `fetch()` returning a `ProviderStatus`. Keep the response
   parsing in a pure `static func parse` so `--selftest` can cover it with synthetic
   data, add it to `allProviders`, and add `icons/<letter>.svg`.
