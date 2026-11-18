@@ -1088,6 +1088,76 @@ final class NoteRowView: LinkRowView {
     }
 }
 
+// MARK: - Menu bar title
+
+/// What sits in the menu bar: a mini bar chart with one bar per tool, filled by how much is left, then the tool with
+/// the most leeway ("✱ 80% left"). In full mode, every tool's mark and figure instead. The point is what you can
+/// act on: which tools have room, and the best one, rather than the one that's already exhausted.
+enum MenuBarTitle {
+    static func barColor(_ used: Double) -> NSColor { used >= 90 ? .systemRed : used >= 75 ? .systemOrange : .labelColor }
+
+    static func bars(_ statuses: [ProviderStatus]) -> NSImage {
+        let used = statuses.compactMap(\.headline)
+        guard !used.isEmpty else {
+            return NSImage(systemSymbolName: "gauge.with.needle", accessibilityDescription: "Leeway") ?? NSImage()
+        }
+        let w: CGFloat = 3, gap: CGFloat = 2, h: CGFloat = 14
+        let size = NSSize(width: CGFloat(used.count) * w + CGFloat(used.count - 1) * gap, height: h)
+        // Colours resolve when drawn, so the image follows the menu bar's light or dark appearance.
+        return NSImage(size: size, flipped: false) { _ in
+            for (i, u) in used.enumerated() {
+                let x = CGFloat(i) * (w + gap)
+                let track = NSRect(x: x, y: 0, width: w, height: h)
+                NSColor.labelColor.withAlphaComponent(0.22).setFill()
+                NSBezierPath(roundedRect: track, xRadius: 1, yRadius: 1).fill()
+                let left = max(0, min(100, 100 - u)) / 100
+                if left > 0 {
+                    barColor(u).setFill()
+                    NSBezierPath(roundedRect: NSRect(x: x, y: 0, width: w, height: max(2, h * left)), xRadius: 1, yRadius: 1).fill()
+                }
+            }
+            return true
+        }
+    }
+
+    static func make(_ statuses: [ProviderStatus], compact: Bool) -> (image: NSImage, text: NSAttributedString) {
+        let live = statuses.filter { $0.missing == nil }
+        let withFigures = live.filter { $0.headline != nil }
+        let font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+        let small = NSFont.systemFont(ofSize: 10, weight: .regular)
+        let title = NSMutableAttributedString(string: " ", attributes: [.font: NSFont.systemFont(ofSize: 5)])
+        func mark(_ s: ProviderStatus) {
+            if let m = Brand.mark(s.short, color: .labelColor, size: 11) {
+                let att = NSTextAttachment(); att.image = m
+                att.bounds = NSRect(x: 0, y: -1.5, width: 11, height: 11)
+                title.append(NSAttributedString(attachment: att))
+                title.append(NSAttributedString(string: " ", attributes: [.font: NSFont.systemFont(ofSize: 4)]))
+            } else {
+                title.append(NSAttributedString(string: s.short + " ", attributes: [.font: font, .foregroundColor: NSColor.secondaryLabelColor]))
+            }
+        }
+        if compact {
+            // The tool with the most room, always as what's left: that's the figure you can act on.
+            if let best = withFigures.max(by: { ($0.headline ?? 100) > ($1.headline ?? 100) }), let u = best.headline {
+                let left = max(0, 100 - u)
+                mark(best)
+                title.append(NSAttributedString(string: String(format: "%.0f%%", left), attributes: [.font: font, .foregroundColor: barColor(u)]))
+                title.append(NSAttributedString(string: " left", attributes: [.font: small, .foregroundColor: NSColor.secondaryLabelColor]))
+            }
+        } else {
+            for (i, s) in withFigures.enumerated() {
+                if i > 0 { title.append(NSAttributedString(string: "  ", attributes: [.font: font])) }
+                mark(s)
+                title.append(NSAttributedString(string: String(format: "%.0f", shownPercent(s.headline!)), attributes: [.font: font, .foregroundColor: barColor(s.headline!)]))
+            }
+        }
+        if live.contains(where: { $0.error != nil && $0.headline == nil }) {
+            title.append(NSAttributedString(string: " !", attributes: [.font: font, .foregroundColor: NSColor.systemOrange]))
+        }
+        return (bars(withFigures), title)
+    }
+}
+
 // MARK: - App
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
@@ -1107,6 +1177,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         item.button?.title = "…"
         menu.delegate = self
         item.menu = menu
+        // Start from the last saved figures, so a restart never blanks the menu and a rate limit on the first
+        // fetch keeps showing them (marked stale) instead of an error.
+        statuses = UsageExport.load()
+        if !statuses.isEmpty { updateTitle() }
         rebuildMenu()
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in self?.refresh() }
@@ -1166,37 +1240,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func updateTitle() {
-        let title = NSMutableAttributedString()
-        let font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
-        var worst: Double = 0
-        // Compact mode shows only the provider nearest its limit (plus any that needs attention) so the
-        // item still fits beside a MacBook notch; the dropdown and tooltip always have the full list.
-        let shown: [ProviderStatus] = compact
-            ? [statuses.max { ($0.headline ?? -1) < ($1.headline ?? -1) }].compactMap { $0 } + statuses.filter { $0.error != nil && $0.headline == nil }
-            : statuses
-        for s in shown {
-            guard s.missing == nil, s.headline != nil || s.error != nil else { continue }   // providers without numbers stay out of the bar
-            if title.length > 0 { title.append(NSAttributedString(string: "  ", attributes: [.font: font])) }
-            if let m = Brand.mark(s.short, color: .labelColor, size: 11) {
-                let att = NSTextAttachment(); att.image = m
-                att.bounds = NSRect(x: 0, y: -1.5, width: 11, height: 11)
-                title.append(NSAttributedString(attachment: att))
-                title.append(NSAttributedString(string: " ", attributes: [.font: NSFont.systemFont(ofSize: 4)]))
-            } else {
-                title.append(NSAttributedString(string: s.short, attributes: [.font: font, .foregroundColor: NSColor.secondaryLabelColor]))
-            }
-            if let h = s.headline {
-                worst = max(worst, h)
-                let color: NSColor = h >= 90 ? .systemRed : (h >= 75 ? .systemOrange : .labelColor)
-                title.append(NSAttributedString(string: String(format: "%.0f", shownPercent(h)), attributes: [.font: font, .foregroundColor: color]))
-            } else {
-                title.append(NSAttributedString(string: "!", attributes: [.font: font, .foregroundColor: NSColor.systemOrange]))
-            }
-        }
-        item.button?.attributedTitle = title.length > 0 ? title : NSAttributedString(string: "LLM")
-        let step = worst >= 90 ? "100" : worst >= 67 ? "67" : worst >= 33 ? "50" : worst > 0 ? "33" : "0"
-        item.button?.image = NSImage(systemSymbolName: "gauge.with.dots.needle.bottom.\(step)percent", accessibilityDescription: "Leeway")
-            ?? NSImage(systemSymbolName: "gauge.with.needle", accessibilityDescription: "Leeway")
+        let t = MenuBarTitle.make(statuses, compact: compact)
+        item.button?.image = t.image
+        item.button?.imagePosition = .imageLeading
+        item.button?.attributedTitle = t.text
         item.button?.setAccessibilityLabel("Leeway: " + (statuses.filter { $0.missing == nil && $0.headline != nil }
             .map { String(format: "%@ %.0f percent %@", $0.name, shownPercent($0.headline!), percentWord) }.joined(separator: ", ")))
         item.button?.toolTip = statuses.filter { $0.missing == nil }.map { s in
@@ -1552,6 +1599,34 @@ if let i = CommandLine.arguments.firstIndex(of: "--render-icon"), i + 1 < Comman
     exit(0)
 }
 
+if let i = CommandLine.arguments.firstIndex(of: "--render-menubar"), i + 1 < CommandLine.arguments.count {
+    // Renders the menu bar item, compact and full, on light and dark bars. Demo figures unless --live.
+    func d(_ n: String, _ sh: String, _ u: Double) -> ProviderStatus { ProviderStatus(name: n, short: sh, windows: [UsageWindow(label: "Weekly", usedPercent: u, resetsAt: nil)]) }
+    let demo = [d("Claude", "C", 95), d("Codex", "X", 67), d("Grok", "K", 20), d("Grok Bot", "B", 100), d("Muse", "M", 40)]
+    let src = CommandLine.arguments.contains("--live") ? fetchAll() : demo
+    let scale: CGFloat = 2, W: CGFloat = 260, rowH: CGFloat = 24
+    let rows: [(Bool, NSAppearance.Name)] = [(true, .aqua), (false, .aqua), (true, .darkAqua), (false, .darkAqua)]
+    guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(W * scale), pixelsHigh: Int(rowH * CGFloat(rows.count) * scale), bitsPerSample: 8, samplesPerPixel: 4,
+                                     hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { exit(1) }
+    rep.size = NSSize(width: W, height: rowH * CGFloat(rows.count))
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+    for (n, (compactMode, look)) in rows.enumerated() {
+        NSAppearance(named: look)!.performAsCurrentDrawingAppearance {
+            let y = rowH * CGFloat(rows.count - 1 - n)
+            (look == .aqua ? NSColor(white: 0.93, alpha: 1) : NSColor(white: 0.16, alpha: 1)).setFill()
+            NSRect(x: 0, y: y, width: W, height: rowH).fill()
+            let t = MenuBarTitle.make(src, compact: compactMode)
+            t.image.draw(in: NSRect(x: 8, y: y + (rowH - t.image.size.height) / 2, width: t.image.size.width, height: t.image.size.height))
+            t.text.draw(at: NSPoint(x: 8 + t.image.size.width, y: y + 4))
+        }
+    }
+    NSGraphicsContext.restoreGraphicsState()
+    try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: CommandLine.arguments[i + 1]))
+    print("wrote \(CommandLine.arguments[i + 1])")
+    exit(0)
+}
+
 if let i = CommandLine.arguments.firstIndex(of: "--render-preview"), i + 1 < CommandLine.arguments.count {
     // Renders the dropdown with invented demo figures to a PNG, for the README. No real data is read.
     let day: TimeInterval = 86400
@@ -1646,6 +1721,25 @@ enum UsageExport {
     }
     static func data(_ statuses: [ProviderStatus], pretty: Bool = true) -> Data {
         (try? JSONSerialization.data(withJSONObject: object(statuses), options: pretty ? [.prettyPrinted, .sortedKeys] : [.sortedKeys])) ?? Data("{}".utf8)
+    }
+    /// Reads the snapshot back into statuses, for a quick start after a restart. Figures older than a week are dropped.
+    static func load(from url: URL = snapshotURL) -> [ProviderStatus] {
+        guard let d = try? Data(contentsOf: url), let o = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],
+              let ps = o["providers"] as? [[String: Any]] else { return [] }
+        return ps.compactMap { p in
+            guard let name = p["name"] as? String, let prov = allProviders.first(where: { $0.name == name }),
+                  let asOf = iso(p["data_as_of"] as? String), Date().timeIntervalSince(asOf) < 7 * 86400 else { return nil }
+            var st = ProviderStatus(name: name, short: prov.short)
+            st.plan = p["plan"] as? String
+            st.fetchedAt = asOf
+            st.note = (p["status"] as? String) == "ok" ? nil : p["message"] as? String
+            if (p["status"] as? String) == "not_set_up" { st.missing = p["message"] as? String }
+            st.windows = (p["windows"] as? [[String: Any]] ?? []).compactMap { w in
+                guard let l = w["label"] as? String, let u = w["used_percent"] as? Double else { return nil }
+                return UsageWindow(label: l, usedPercent: u, resetsAt: iso(w["resets_at"] as? String), headline: w["counts_toward_headline"] as? Bool ?? true)
+            }
+            return st
+        }
     }
     static func writeSnapshot(_ statuses: [ProviderStatus]) {
         let url = snapshotURL
@@ -1872,6 +1966,11 @@ enum SelfTest {
         check(eps[1]["status"] as? String == "not_set_up" && eps[2]["status"] as? String == "ok", "export states")
 
         check(UsageExport.snapshotURL.path.hasSuffix("/usage.json") && !bundleID.isEmpty, "snapshot path resolves")
+        let tmp = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("leeway-selftest-\(getpid()).json")
+        var fresh = x; fresh.fetchedAt = Date()
+        try? UsageExport.data([fresh]).write(to: tmp)
+        let back = UsageExport.load(from: tmp); try? FileManager.default.removeItem(at: tmp)
+        check(back.count == 1 && back[0].short == "X" && back[0].headline == 11 && back[0].plan == "Pro 100" && back[0].account == nil, "snapshot round trip \(back.map(\.name))")
 
         // MCP: handshake, tool list, both tools, errors, notifications.
         let load = { ej }
@@ -1888,6 +1987,11 @@ enum SelfTest {
         check(((bad?["error"] as? [String: Any])?["code"] as? Int) == -32601, "mcp unknown method")
         let badTool = (MCPServer.handle(["jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": ["name": "get_usage", "arguments": ["provider": "nope"]]], load: load)?["result"] as? [String: Any])?["isError"] as? Bool
         check(badTool == true, "mcp unknown provider is a tool error")
+
+        // Menu bar: compact mode names the tool with the most left, not the exhausted one.
+        func mb(_ n: String, _ u: Double) -> ProviderStatus { ProviderStatus(name: n, short: "?", windows: [UsageWindow(label: "w", usedPercent: u, resetsAt: nil)]) }
+        let mbt = MenuBarTitle.make([mb("A", 100), mb("B", 20), mb("C", 67)], compact: true).text.string
+        check(mbt.contains("80%") && mbt.contains("left") && !mbt.contains("100"), "menu bar shows the most leeway: \(mbt)")
 
         // Helpers.
         check(windowLabel(seconds: 604800) == "Weekly" && windowLabel(seconds: 18000) == "5-hour", "window labels")
@@ -1999,7 +2103,7 @@ enum LoginAgent {
     }
 }
 let launchedByAgent = ProcessInfo.processInfo.environment["XPC_SERVICE_NAME"] == LoginAgent.label
-let headlessRun = ["--print", "--setup", "--selftest", "--json", "--mcp", "--mcp-config", "--login", "--render-marks", "--render-icon", "--render-preview"].contains { CommandLine.arguments.contains($0) }
+let headlessRun = ["--print", "--setup", "--selftest", "--json", "--mcp", "--mcp-config", "--login", "--render-marks", "--render-icon", "--render-preview", "--render-menubar"].contains { CommandLine.arguments.contains($0) }
 
 // Must come after LoginAgent and its globals: top-level code runs in file order, and touching a global before its
 // line has run crashes (this handler once sat above them and segfaulted).

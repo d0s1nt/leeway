@@ -15,6 +15,10 @@ First release intended for anyone to install, under a new name: **Leeway** (prev
 - Redesigned dropdown: fixed columns so figures never collide, coloured percentages
   near a limit, shorter notes, account shown on hover, tools awaiting setup listed
   last, and settings gathered into a Settings submenu.
+- New menu bar item: a bar per tool showing what's left, then the tool with the most
+  leeway. It used to show only the most-used tool, which was useless once that tool
+  was exhausted.
+- Restarts begin from the last saved figures instead of an empty menu.
 - App icon, an About window, and a manual Check for Updates.
 - VoiceOver reads every row of the dropdown.
 - Finds command-line tools through your login shell's PATH (zsh, bash or fish) and

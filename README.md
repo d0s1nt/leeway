@@ -68,8 +68,11 @@ That compiles a universal app to `~/Applications/Leeway.app` and launches it.
 
 ## Using it
 
-The menu bar shows a gauge plus the provider closest to its limit, as its logo and
-percentage. Orange from 75%, red from 90%. Click it for every provider, each limit
+The menu bar shows a small bar chart with one bar per tool, filled by how much is
+left and turning orange then red near a limit, followed by the tool with the most
+leeway, for example its logo and "80% left". An orange "!" means a tool needs
+attention. Turn off Settings › Compact Menu Bar to see every tool's figure instead.
+Click it for every provider, each limit
 window and when it resets. Click a provider's name to open its usage page; hover it
 to see which account is signed in. Tools still waiting on setup sit at the bottom. Figures
 refresh every 5 minutes and whenever you open the menu.
@@ -81,7 +84,7 @@ spend caps appear as rows but don't drive it.
 |---|---|
 | Refresh Now | Fetches every provider again; shows when it last did |
 | Settings › Launch at Login | Starts at login, and relaunches Leeway if it ever crashes |
-| Settings › Compact Menu Bar | On by default: one provider in the menu bar. Off: all of them |
+| Settings › Compact Menu Bar | On by default: the tool with the most left. Off: every tool's figure |
 | Settings › Show Remaining | Counts down what's left, like the vendors' own screens |
 | Settings › Renew Expired Sign-ins | Off by default. See below |
 | Settings › Connect AI Tools… | Lets Grok Bot, Claude Code, Codex, Grok and other agents query usage (below) |
