@@ -16,7 +16,12 @@ scan() {  # $1 = label, stdin = text
   hits=$(grep -nEo "$PAT|$PII" | grep -vE "$ALLOW" | cut -c1-80 | sort -u | head -20)
   if [ -n "$hits" ]; then echo "FOUND in $1:"; echo "$hits"; fail=1; else echo "clean: $1"; fi
 }
-git ls-files -z | xargs -0 cat 2>/dev/null | scan "tracked files"
+# Per file, so a binary asset (icons, screenshots) can't make grep treat everything after it as binary.
+git grep -I -h -o -E "$PAT|$PII" -- . 2>/dev/null | scan "tracked text files (working tree)"
+git ls-files -o --exclude-standard -z | xargs -0 grep -I -h -o -E "$PAT|$PII" 2>/dev/null | scan "untracked text files about to be added"
+# Binary assets: only image formats are expected, and they must not carry text metadata such as author or paths.
+for f in $(git ls-files | grep -E '\.(png|icns|jpg|jpeg|gif)$'); do strings -n 8 "$f" | scan "binary asset $f" >/dev/null || { echo "FOUND in $f"; fail=1; }; done
+echo "checked: binary assets"
 git log -p --all --format='commit %H %an <%ae>%n%B' 2>/dev/null | scan "git history (all commits, messages and authors)"
 for bin in dist/*.app/Contents/MacOS/*(N); do strings -n 8 "$bin" | scan "release binary $bin"; done
 for z in dist/*.zip(N); do unzip -l "$z" | awk '{print $4}' | grep -iE '\.env|auth\.json|creds|\.pem|\.key$' && { echo "FOUND credential-like file in $z"; fail=1; } || echo "clean: file list of $z"; done

@@ -1,0 +1,18 @@
+name: Provider request
+description: Ask for another AI tool to be supported
+labels: [provider]
+body:
+  - type: input
+    id: tool
+    attributes:
+      label: Tool
+      placeholder: "e.g. GitHub Copilot"
+    validations:
+      required: true
+  - type: textarea
+    id: where
+    attributes:
+      label: Where does the tool show its own usage?
+      description: A command, a screen in the app, or a web page. Screenshots welcome, with account details hidden.
+    validations:
+      required: true

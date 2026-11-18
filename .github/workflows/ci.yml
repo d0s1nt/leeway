@@ -1,0 +1,35 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  build-and-test:
+    name: Build and test (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Apple Silicon and Intel: the self-test runs natively on each half of the universal binary.
+        runner: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # check-secrets.sh scans the whole history
+      - name: Build universal app, disk image and zip (also runs the self-test and the secret scan)
+        run: ./release.sh
+      - name: Self-test on this architecture
+        run: |
+          uname -m
+          "dist/LLM Usage.app/Contents/MacOS/LLMUsage" --selftest
+      - name: Setup check on a machine with no AI tools
+        run: '"dist/LLM Usage.app/Contents/MacOS/LLMUsage" --setup'
+      - name: Every command-line flag exits cleanly
+        run: |
+          BIN="dist/LLM Usage.app/Contents/MacOS/LLMUsage"
+          "$BIN" --login status
+          "$BIN" --print
+          "$BIN" --render-preview "$RUNNER_TEMP/preview.png"
+          "$BIN" --render-icon "$RUNNER_TEMP/icon.iconset"

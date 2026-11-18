@@ -46,8 +46,14 @@ let refreshHint = "or turn on \u{201C}Renew Expired Sign-ins\u{201D} in this men
 enum Tools {
     static let searchPath: [String] = {
         var dirs = (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map(String.init)
-        let (code, out) = run("/bin/zsh", ["-lc", "print -r -- $PATH"])
-        if code == 0, let line = out.split(separator: "\n").last { dirs += line.split(separator: ":").map(String.init) }
+        // Ask the user's own login shell, since that's where installers add their PATH entries. Bounded, and the
+        // value is fenced by markers so anything a profile prints doesn't get mistaken for it.
+        let shell = ProcessInfo.processInfo.environment["SHELL"].flatMap { FileManager.default.isExecutableFile(atPath: $0) ? $0 : nil } ?? "/bin/zsh"
+        let script = shell.hasSuffix("fish") ? "printf '@@P@@%s@@P@@' (string join : $PATH)" : "printf '@@P@@%s@@P@@' \"$PATH\""
+        let (_, out) = run(shell, ["-l", "-c", script], timeout: 5)
+        if let a = out.range(of: "@@P@@"), let b = out.range(of: "@@P@@", range: a.upperBound..<out.endIndex) {
+            dirs += out[a.upperBound..<b.lowerBound].split(separator: ":").map(String.init)
+        }
         dirs += [".local/bin", "bin", ".npm-global/bin", ".bun/bin", ".volta/bin", ".cargo/bin", ".deno/bin"].map(home)
         dirs += ["/opt/homebrew/bin", "/usr/local/bin"]
         // Node version managers put global installs under a per-version folder; newest first.
@@ -158,17 +164,38 @@ func iso(_ s: String?) -> Date? {
 }
 
 @discardableResult
-func run(_ cmd: String, _ args: [String]) -> (Int32, String) {
+/// Runs a program and returns (exit status, combined output). A program still running after `timeout` seconds is
+/// terminated, then killed, and reported as exit status -2, so a hung tool can never wedge a refresh.
+func run(_ cmd: String, _ args: [String], timeout: TimeInterval = 30) -> (Int32, String) {
     let p = Process()
     p.executableURL = URL(fileURLWithPath: cmd)
     p.arguments = args
+    p.standardInput = FileHandle.nullDevice
     let pipe = Pipe()
     p.standardOutput = pipe
     p.standardError = pipe
+    let exited = DispatchSemaphore(value: 0)
+    p.terminationHandler = { _ in exited.signal() }
     do { try p.run() } catch { return (-1, error.localizedDescription) }
-    let data = (try? pipe.fileHandleForReading.readToEnd()) ?? Data()
-    p.waitUntilExit()
-    return (p.terminationStatus, String(decoding: data, as: UTF8.self))
+    var data = Data()
+    let lock = NSLock()
+    let reader = DispatchGroup()
+    reader.enter()
+    DispatchQueue.global(qos: .utility).async {
+        let d = (try? pipe.fileHandleForReading.readToEnd()) ?? Data()
+        lock.lock(); data = d; lock.unlock()
+        reader.leave()
+    }
+    var timedOut = false
+    if exited.wait(timeout: .now() + timeout) == .timedOut {
+        timedOut = true
+        p.terminate()
+        if exited.wait(timeout: .now() + 2) == .timedOut { kill(p.processIdentifier, SIGKILL); _ = exited.wait(timeout: .now() + 2) }
+    }
+    // Something the program started may still hold the pipe open; don't wait on it forever.
+    if reader.wait(timeout: .now() + 2) == .timedOut { try? pipe.fileHandleForReading.close() }
+    lock.lock(); let out = String(decoding: data, as: UTF8.self); lock.unlock()
+    return (timedOut ? -2 : p.terminationStatus, out)
 }
 
 func home(_ rel: String) -> String { NSHomeDirectory() + "/" + rel }
@@ -207,7 +234,7 @@ struct ClaudeProvider: Provider {
     func fetch() -> ProviderStatus {
         var st = ProviderStatus(name: name, short: short, link: URL(string: "https://claude.ai/settings/usage"))
         // Read the credential blob Claude Code keeps in the login keychain.
-        let (code, blob) = run("/usr/bin/security", ["find-generic-password", "-s", Self.service, "-w"])
+        let (code, blob) = run("/usr/bin/security", ["find-generic-password", "-s", Self.service, "-w"], timeout: 300)
         guard code == 0, let data = blob.trimmingCharacters(in: .whitespacesAndNewlines).data(using: .utf8),
               var root = try? json(data), var oauth = root["claudeAiOauth"] as? [String: Any],
               var access = oauth["accessToken"] as? String else {
@@ -239,7 +266,7 @@ struct ClaudeProvider: Provider {
                 root["claudeAiOauth"] = oauth
                 let acct = keychainAccount() ?? NSUserName()
                 let newBlob = String(decoding: jsonData(root), as: UTF8.self)
-                run("/usr/bin/security", ["add-generic-password", "-U", "-a", acct, "-s", Self.service, "-w", newBlob])
+                run("/usr/bin/security", ["add-generic-password", "-U", "-a", acct, "-s", Self.service, "-w", newBlob], timeout: 300)
             } catch {
                 st.error = "Refresh failed: \(error)"
                 return st
@@ -253,43 +280,13 @@ struct ClaudeProvider: Provider {
                 let msg = ((o["error"] as? [String: Any])?["message"] as? String) ?? String(decoding: d, as: UTF8.self)
                 throw HTTPError.status(c, msg)
             }
-            if let limits = o["limits"] as? [[String: Any]], !limits.isEmpty {
-                for l in limits {
-                    guard let pct = l["percent"] as? Double else { continue }
-                    let kind = l["kind"] as? String ?? "limit"
-                    var label: String
-                    switch kind {
-                    case "five_hour": label = "5-hour"
-                    case "weekly_all": label = "Weekly (all)"
-                    case "weekly_scoped":
-                        let model = ((l["scope"] as? [String: Any])?["model"] as? [String: Any])?["display_name"] as? String
-                        label = "Weekly " + (model ?? "scoped")
-                    default: label = kind.replacingOccurrences(of: "_", with: " ").capitalized
-                    }
-                    st.windows.append(UsageWindow(label: label, usedPercent: pct, resetsAt: iso(l["resets_at"] as? String), headline: kind != "five_hour"))
-                }
-            } else {
-                let order = ["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"]
-                let labels = ["five_hour": "5-hour", "seven_day": "Weekly (all)", "seven_day_opus": "Weekly Opus", "seven_day_sonnet": "Weekly Sonnet"]
-                for k in order {
-                    guard let w = o[k] as? [String: Any], let u = w["utilization"] as? Double else { continue }
-                    st.windows.append(UsageWindow(label: labels[k] ?? k, usedPercent: u, resetsAt: iso(w["resets_at"] as? String), headline: k != "five_hour"))
-                }
-            }
-            if let bd = o["seven_day_breakdown"] as? [String: Any], let rows = bd["rows"] as? [[String: Any]] {
-                let parts = rows.compactMap { r -> String? in
-                    guard let n = r["display_name"] as? String, let p = r["percent"] as? Double, p > 0 else { return nil }
-                    return "\(n) \(Int(p))%"
-                }
-                if !parts.isEmpty { st.note = "This week by surface: " + parts.joined(separator: " · ") }
-            }
-            if st.windows.isEmpty { st.note = "No limit windows reported" }
+            Self.parse(o, into: &st)
         } catch { st.error = "\(error)" }
         return st
     }
 
     private func keychainAccount() -> String? {
-        let (_, out) = run("/usr/bin/security", ["find-generic-password", "-s", Self.service])
+        let (_, out) = run("/usr/bin/security", ["find-generic-password", "-s", Self.service], timeout: 300)
         guard let r = out.range(of: "\"acct\"<blob>=\"") else { return nil }
         let rest = out[r.upperBound...]
         return rest.split(separator: "\"").first.map(String.init)
@@ -341,30 +338,7 @@ struct CodexProvider: Provider {
                                   headers: ["Authorization": "Bearer \(access)", "ChatGPT-Account-Id": acct, "User-Agent": "codex-cli"])
             guard c == 200 else { throw HTTPError.status(c, String(decoding: d, as: UTF8.self)) }
             let o = try json(d)
-            // The endpoint's internal plan names don't all match what ChatGPT calls them.
-            let planNames = ["prolite": "Pro 100", "pro": "Pro", "plus": "Plus", "free": "Free", "team": "Team", "business": "Business", "enterprise": "Enterprise", "edu": "Edu", "go": "Go"]
-            st.plan = (o["plan_type"] as? String).map { planNames[$0.lowercased()] ?? $0.capitalized }
-            // Which ChatGPT account the CLI is signed into matters when the numbers look wrong.
-            if let email = o["email"] as? String, !email.isEmpty { st.plan = [st.plan, email].compactMap { $0 }.joined(separator: " · ") }
-            if let rl = o["rate_limit"] as? [String: Any] {
-                for key in ["primary_window", "secondary_window"] {
-                    guard let w = rl[key] as? [String: Any], let used = w["used_percent"] as? Double else { continue }
-                    let secs = w["limit_window_seconds"] as? Int ?? 0
-                    let reset = (w["reset_at"] as? Double).map { Date(timeIntervalSince1970: $0) }
-                    st.windows.append(UsageWindow(label: windowLabel(seconds: secs) + " limit", usedPercent: used, resetsAt: reset))
-                }
-            }
-            var notes: [String] = []
-            if let rl = o["rate_limit"] as? [String: Any], rl["limit_reached"] as? Bool == true { notes.append("Limit reached") }
-            if let cr = o["credits"] as? [String: Any] {
-                if cr["unlimited"] as? Bool == true { notes.append("Unlimited credits") }
-                else if cr["has_credits"] as? Bool == true, let bal = cr["balance"] as? String { notes.append("Credits: \(bal)") }
-                if cr["overage_limit_reached"] as? Bool == true { notes.append("overage limit reached") }
-            }
-            if let rc = o["rate_limit_reset_credits"] as? [String: Any], let n = rc["available_count"] as? Int, n > 0 { notes.append("\(n) limit reset\(n == 1 ? "" : "s") available") }
-            if let sc = o["spend_control"] as? [String: Any], sc["reached"] as? Bool == true { notes.append("spend control reached") }
-            if st.windows.isEmpty { notes.append("No limit windows reported") }
-            if !notes.isEmpty { st.note = notes.joined(separator: " · ") }
+            Self.parse(o, into: &st)
         } catch { st.error = "\(error)" }
         return st
     }
@@ -453,13 +427,7 @@ struct GeminiProvider: Provider {
             let (c2, d2) = try http("\(endpoint):retrieveUserQuota", method: "POST", headers: headers, body: jsonData(["project": project]))
             guard c2 == 200 else { throw HTTPError.status(c2, String(decoding: d2, as: UTF8.self)) }
             let q = try json(d2)
-            for b in (q["buckets"] as? [[String: Any]] ?? []) {
-                guard let model = b["modelId"] as? String, let frac = b["remainingFraction"] as? Double else { continue }
-                let label = model.replacingOccurrences(of: "gemini-", with: "")
-                st.windows.append(UsageWindow(label: label, usedPercent: (1 - frac) * 100, resetsAt: iso(b["resetTime"] as? String)))
-            }
-            st.windows.sort { $0.label < $1.label }
-            if st.windows.isEmpty { st.note = "No quota buckets reported" }
+            Self.parse(quota: q, into: &st)
         } catch { st.error = "\(error)" }
         return st
     }
@@ -617,19 +585,7 @@ struct GrokProvider: Provider {
         guard let bill = client.call("_x.ai/billing", [:]), let result = bill["result"] as? [String: Any] else {
             st.error = "No billing answer from grok agent"; return st
         }
-        if let tier = result["subscription_tier"] as? String, !tier.isEmpty { st.plan = tier }
-        let cfg = (result["config"] as? [String: Any]) ?? [:]
-        func val(_ k: String) -> Double { ((cfg[k] as? [String: Any])?["val"] as? Double) ?? (cfg[k] as? Double) ?? 0 }
-        let period = cfg["currentPeriod"] as? [String: Any]
-        let periodEnd = iso(period?["end"] as? String) ?? iso(cfg["billingPeriodEnd"] as? String)
-        let periodType = (period?["type"] as? String ?? "").replacingOccurrences(of: "USAGE_PERIOD_TYPE_", with: "").capitalized
-        // Proto-style JSON omits zero-valued fields, so a missing creditUsagePercent means 0%.
-        let pct = (cfg["creditUsagePercent"] as? Double) ?? 0
-        st.windows.append(UsageWindow(label: periodType.isEmpty ? "Usage limit" : "\(periodType) limit", usedPercent: pct, resetsAt: periodEnd))
-        let cap = val("onDemandCap")
-        if cap > 0 { st.windows.append(UsageWindow(label: "Pay-as-you-go", usedPercent: val("onDemandUsed") / cap * 100, resetsAt: periodEnd, headline: false)) }
-        let prepaid = val("prepaidBalance")
-        if prepaid > 0 { st.note = String(format: "Prepaid balance: %.2f", prepaid) }
+        Self.parse(billing: result, into: &st)
         return st
     }
 }
@@ -670,35 +626,6 @@ struct MuseProvider: Provider {
                 : ((o["hint"] as? String) ?? "No usage data")
             return st
         }
-        // The allowance shape isn't documented; read any percent-like numbers and any reset dates.
-        func walk(_ d: [String: Any], prefix: String) {
-            var pct: Double? = nil
-            var reset: Date? = nil
-            for (k, v) in d {
-                let lk = k.lowercased()
-                if let n = v as? Double {
-                    if lk.contains("percent") || lk.contains("pct") { pct = lk.contains("remaining") ? 100 - n : n }
-                    else if lk.contains("fraction") { pct = (lk.contains("remaining") ? 1 - n : n) * 100 }
-                    else if lk.contains("reset") && lk.hasSuffix("ms") { reset = Date(timeIntervalSince1970: n / 1000) }
-                    else if lk.contains("reset") { reset = Date(timeIntervalSince1970: n) }
-                } else if let s = v as? String, lk.contains("reset") || lk.hasSuffix("_at") || lk.hasSuffix("end") {
-                    reset = iso(s) ?? reset
-                } else if let sub = v as? [String: Any] {
-                    walk(sub, prefix: prefix.isEmpty ? k : "\(prefix) \(k)")
-                }
-            }
-            if pct == nil, let used = (d["used"] as? Double), let limit = (d["limit"] as? Double) ?? (d["total"] as? Double), limit > 0 {
-                pct = used / limit * 100
-            }
-            let label: String
-            switch prefix.lowercased() {
-            case "": label = "Allowance"
-            case "window": label = "5-hour window"
-            case "weekly": label = "Weekly"
-            default: label = prefix.capitalized
-            }
-            if let p = pct { st.windows.append(UsageWindow(label: label, usedPercent: p, resetsAt: reset, headline: label != "5-hour window")) }
-        }
         let asOf = (allowance["asOfMs"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) } ?? .distantPast
         if let (reset, seen) = lastQuotaExhausted(), seen > asOf, reset > Date() {
             st.windows.append(UsageWindow(label: "Subscription window", usedPercent: 100, resetsAt: reset))
@@ -706,9 +633,7 @@ struct MuseProvider: Provider {
             if let plan = allowance["tier"] as? String { st.plan = plan }
             return st
         }
-        walk(allowance, prefix: "")
-        if let plan = (allowance["plan"] as? String) ?? (allowance["tier"] as? String) { st.plan = plan }
-        if st.windows.isEmpty { st.note = "Allowance present but no percentage fields recognised" }
+        Self.parse(allowance: allowance, into: &st)
         return st
     }
 }
@@ -754,20 +679,7 @@ struct GrokBotProvider: Provider {
         }
         let readAt = (reading["readAtMs"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) } ?? blob.mtime
         st.fetchedAt = readAt
-        var plan = (usage["grokPlanLabel"] as? String) ?? "Grok Bot"
-        if usage["isSandTrial"] as? Bool == true { plan += " (trial)" }
-        if usage["isTeamSeat"] as? Bool == true { plan += " · team seat" }
-        st.plan = plan
-        let reset = (usage["nextResetMs"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) }
-        if let pct = usage["percentUsed"] as? Double {
-            st.windows.append(UsageWindow(label: "Included usage", usedPercent: min(max(pct, 0), 100), resetsAt: reset))
-        }
-        var notes: [String] = []
-        if let od = usage["onDemand"] as? [String: Any], let limit = od["limitCents"] as? Double, limit > 0 {
-            let used = (od["usedCents"] as? Double) ?? 0
-            st.windows.append(UsageWindow(label: "On-demand cap", usedPercent: min(used / limit * 100, 100), resetsAt: nil, headline: false))
-            notes.append(String(format: "On-demand spend $%.2f of a $%.2f cap", used / 100, limit / 100))
-        }
+        var notes = Self.parse(usage: usage, into: &st)
         // The app refreshes this reading itself; say when it stops being current.
         let running = !NSRunningApplication.runningApplications(withBundleIdentifier: "com.anysphere.sand").isEmpty
         let expires = (value["expiresAtMs"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) }
@@ -796,6 +708,166 @@ func base32Decode(_ s: String) -> String? {
         if count >= 8 { out.append(UInt8((bits >> UInt32(count - 8)) & 0xFF)); count -= 8 }
     }
     return String(bytes: out, encoding: .utf8)
+}
+
+// MARK: - Response parsers (pure: no network, files or credentials, so --selftest can exercise them)
+
+extension ClaudeProvider {
+    /// Parses the body of api.anthropic.com/api/oauth/usage.
+    static func parse(_ o: [String: Any], into st: inout ProviderStatus) {
+        if let limits = o["limits"] as? [[String: Any]], !limits.isEmpty {
+            for l in limits {
+                guard let pct = l["percent"] as? Double else { continue }
+                let kind = l["kind"] as? String ?? "limit"
+                var label: String
+                switch kind {
+                case "five_hour": label = "5-hour"
+                case "weekly_all": label = "Weekly (all)"
+                case "weekly_scoped":
+                    let model = ((l["scope"] as? [String: Any])?["model"] as? [String: Any])?["display_name"] as? String
+                    label = "Weekly " + (model ?? "scoped")
+                default: label = kind.replacingOccurrences(of: "_", with: " ").capitalized
+                }
+                st.windows.append(UsageWindow(label: label, usedPercent: pct, resetsAt: iso(l["resets_at"] as? String), headline: kind != "five_hour"))
+            }
+        } else {
+            let order = ["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"]
+            let labels = ["five_hour": "5-hour", "seven_day": "Weekly (all)", "seven_day_opus": "Weekly Opus", "seven_day_sonnet": "Weekly Sonnet"]
+            for k in order {
+                guard let w = o[k] as? [String: Any], let u = w["utilization"] as? Double else { continue }
+                st.windows.append(UsageWindow(label: labels[k] ?? k, usedPercent: u, resetsAt: iso(w["resets_at"] as? String), headline: k != "five_hour"))
+            }
+        }
+        if let bd = o["seven_day_breakdown"] as? [String: Any], let rows = bd["rows"] as? [[String: Any]] {
+            let parts = rows.compactMap { r -> String? in
+                guard let n = r["display_name"] as? String, let p = r["percent"] as? Double, p > 0 else { return nil }
+                return "\(n) \(Int(p))%"
+            }
+            if !parts.isEmpty { st.note = "This week by surface: " + parts.joined(separator: " · ") }
+        }
+        if st.windows.isEmpty { st.note = "No limit windows reported" }
+    }
+}
+
+extension CodexProvider {
+    /// Parses the body of chatgpt.com/backend-api/wham/usage.
+    static func parse(_ o: [String: Any], into st: inout ProviderStatus) {
+        // The endpoint's internal plan names don't all match what ChatGPT calls them.
+        let planNames = ["prolite": "Pro 100", "pro": "Pro", "plus": "Plus", "free": "Free", "team": "Team", "business": "Business", "enterprise": "Enterprise", "edu": "Edu", "go": "Go"]
+        st.plan = (o["plan_type"] as? String).map { planNames[$0.lowercased()] ?? $0.capitalized }
+        // Which ChatGPT account the CLI is signed into matters when the numbers look wrong.
+        if let email = o["email"] as? String, !email.isEmpty { st.plan = [st.plan, email].compactMap { $0 }.joined(separator: " · ") }
+        if let rl = o["rate_limit"] as? [String: Any] {
+            for key in ["primary_window", "secondary_window"] {
+                guard let w = rl[key] as? [String: Any], let used = w["used_percent"] as? Double else { continue }
+                let secs = w["limit_window_seconds"] as? Int ?? 0
+                let reset = (w["reset_at"] as? Double).map { Date(timeIntervalSince1970: $0) }
+                st.windows.append(UsageWindow(label: windowLabel(seconds: secs) + " limit", usedPercent: used, resetsAt: reset))
+            }
+        }
+        var notes: [String] = []
+        if let rl = o["rate_limit"] as? [String: Any], rl["limit_reached"] as? Bool == true { notes.append("Limit reached") }
+        if let cr = o["credits"] as? [String: Any] {
+            if cr["unlimited"] as? Bool == true { notes.append("Unlimited credits") }
+            else if cr["has_credits"] as? Bool == true, let bal = cr["balance"] as? String { notes.append("Credits: \(bal)") }
+            if cr["overage_limit_reached"] as? Bool == true { notes.append("overage limit reached") }
+        }
+        if let rc = o["rate_limit_reset_credits"] as? [String: Any], let n = rc["available_count"] as? Int, n > 0 { notes.append("\(n) limit reset\(n == 1 ? "" : "s") available") }
+        if let sc = o["spend_control"] as? [String: Any], sc["reached"] as? Bool == true { notes.append("spend control reached") }
+        if st.windows.isEmpty { notes.append("No limit windows reported") }
+        if !notes.isEmpty { st.note = notes.joined(separator: " · ") }
+    }
+}
+
+extension GeminiProvider {
+    /// Parses the body of Code Assist's retrieveUserQuota.
+    static func parse(quota q: [String: Any], into st: inout ProviderStatus) {
+        for b in (q["buckets"] as? [[String: Any]] ?? []) {
+            guard let model = b["modelId"] as? String, let frac = b["remainingFraction"] as? Double else { continue }
+            let label = model.replacingOccurrences(of: "gemini-", with: "")
+            st.windows.append(UsageWindow(label: label, usedPercent: (1 - frac) * 100, resetsAt: iso(b["resetTime"] as? String)))
+        }
+        st.windows.sort { $0.label < $1.label }
+        if st.windows.isEmpty { st.note = "No quota buckets reported" }
+    }
+}
+
+extension GrokProvider {
+    /// Parses the result of the grok agent's `_x.ai/billing` method.
+    static func parse(billing result: [String: Any], into st: inout ProviderStatus) {
+        if let tier = result["subscription_tier"] as? String, !tier.isEmpty { st.plan = tier }
+        let cfg = (result["config"] as? [String: Any]) ?? [:]
+        func val(_ k: String) -> Double { ((cfg[k] as? [String: Any])?["val"] as? Double) ?? (cfg[k] as? Double) ?? 0 }
+        let period = cfg["currentPeriod"] as? [String: Any]
+        let periodEnd = iso(period?["end"] as? String) ?? iso(cfg["billingPeriodEnd"] as? String)
+        let periodType = (period?["type"] as? String ?? "").replacingOccurrences(of: "USAGE_PERIOD_TYPE_", with: "").capitalized
+        // Proto-style JSON omits zero-valued fields, so a missing creditUsagePercent means 0%.
+        let pct = (cfg["creditUsagePercent"] as? Double) ?? 0
+        st.windows.append(UsageWindow(label: periodType.isEmpty ? "Usage limit" : "\(periodType) limit", usedPercent: pct, resetsAt: periodEnd))
+        let cap = val("onDemandCap")
+        if cap > 0 { st.windows.append(UsageWindow(label: "Pay-as-you-go", usedPercent: val("onDemandUsed") / cap * 100, resetsAt: periodEnd, headline: false)) }
+        let prepaid = val("prepaidBalance")
+        if prepaid > 0 { st.note = String(format: "Prepaid balance: %.2f", prepaid) }
+    }
+}
+
+extension GrokBotProvider {
+    /// Parses the `usage` object of Grok Bot's cached weekly-usage reading; returns note fragments.
+    static func parse(usage: [String: Any], into st: inout ProviderStatus) -> [String] {
+        var plan = (usage["grokPlanLabel"] as? String) ?? "Grok Bot"
+        if usage["isSandTrial"] as? Bool == true { plan += " (trial)" }
+        if usage["isTeamSeat"] as? Bool == true { plan += " · team seat" }
+        st.plan = plan
+        let reset = (usage["nextResetMs"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) }
+        if let pct = usage["percentUsed"] as? Double {
+            st.windows.append(UsageWindow(label: "Included usage", usedPercent: min(max(pct, 0), 100), resetsAt: reset))
+        }
+        var notes: [String] = []
+        if let od = usage["onDemand"] as? [String: Any], let limit = od["limitCents"] as? Double, limit > 0 {
+            let used = (od["usedCents"] as? Double) ?? 0
+            st.windows.append(UsageWindow(label: "On-demand cap", usedPercent: min(used / limit * 100, 100), resetsAt: nil, headline: false))
+            notes.append(String(format: "On-demand spend $%.2f of a $%.2f cap", used / 100, limit / 100))
+        }
+        return notes
+    }
+}
+
+extension MuseProvider {
+    /// Parses the `allowance` object of `muse usage --json`, whose shape isn't documented.
+    static func parse(allowance: [String: Any], into st: inout ProviderStatus) {
+        // The allowance shape isn't documented; read any percent-like numbers and any reset dates.
+        func walk(_ d: [String: Any], prefix: String) {
+            var pct: Double? = nil
+            var reset: Date? = nil
+            for (k, v) in d {
+                let lk = k.lowercased()
+                if let n = v as? Double {
+                    if lk.contains("percent") || lk.contains("pct") { pct = lk.contains("remaining") ? 100 - n : n }
+                    else if lk.contains("fraction") { pct = (lk.contains("remaining") ? 1 - n : n) * 100 }
+                    else if lk.contains("reset") && lk.hasSuffix("ms") { reset = Date(timeIntervalSince1970: n / 1000) }
+                    else if lk.contains("reset") { reset = Date(timeIntervalSince1970: n) }
+                } else if let s = v as? String, lk.contains("reset") || lk.hasSuffix("_at") || lk.hasSuffix("end") {
+                    reset = iso(s) ?? reset
+                } else if let sub = v as? [String: Any] {
+                    walk(sub, prefix: prefix.isEmpty ? k : "\(prefix) \(k)")
+                }
+            }
+            if pct == nil, let used = (d["used"] as? Double), let limit = (d["limit"] as? Double) ?? (d["total"] as? Double), limit > 0 {
+                pct = used / limit * 100
+            }
+            let label: String
+            switch prefix.lowercased() {
+            case "": label = "Allowance"
+            case "window": label = "5-hour window"
+            case "weekly": label = "Weekly"
+            default: label = prefix.capitalized
+            }
+            if let p = pct { st.windows.append(UsageWindow(label: label, usedPercent: p, resetsAt: reset, headline: label != "5-hour window")) }
+        }
+        walk(allowance, prefix: "")
+        if let plan = (allowance["plan"] as? String) ?? (allowance["tier"] as? String) { st.plan = plan }
+        if st.windows.isEmpty { st.note = "Allowance present but no percentage fields recognised" }
+    }
 }
 
 // MARK: - Menu rows (fixed width so long notes never stretch the menu)
@@ -883,6 +955,10 @@ final class HeaderRowView: LinkRowView {
         super.init(frame: NSRect(x: 0, y: 0, width: menuWidth, height: 28))
         link = st.link
         toolTip = st.link.map { "Open \($0.host ?? "usage page")" }
+        setAccessibilityElement(true)
+        setAccessibilityRole(st.link == nil ? .staticText : .button)
+        let figure = st.headline.map { String(format: "%.0f percent %@", shownPercent($0), percentWord) } ?? (st.error != nil ? "needs attention" : "no data")
+        setAccessibilityLabel([st.name, st.plan, figure].compactMap { $0 }.joined(separator: ", "))
     }
     required init?(coder: NSCoder) { fatalError() }
     override func draw(_ dirtyRect: NSRect) {
@@ -923,6 +999,9 @@ final class UsageRowView: NSView {
         usage = w
         super.init(frame: NSRect(x: 0, y: 0, width: menuWidth, height: 24))
         if let r = w.resetsAt { toolTip = "Resets \(absolute(r))" }
+        setAccessibilityElement(true)
+        setAccessibilityRole(.staticText)
+        setAccessibilityLabel(String(format: "%@: %.0f percent %@", w.label, shownPercent(w.usedPercent), percentWord) + (w.resetsAt.map { ", resets \(absolute($0))" } ?? ""))
     }
     required init?(coder: NSCoder) { fatalError() }
 
@@ -967,6 +1046,9 @@ final class NoteRowView: LinkRowView {
         textRect = NSRect(x: rowInset + 21, y: 4, width: width, height: h)
         super.init(frame: NSRect(x: 0, y: 0, width: menuWidth, height: h + 8))
         self.link = link
+        setAccessibilityElement(true)
+        setAccessibilityRole(link == nil ? .staticText : .link)
+        setAccessibilityLabel(note)
     }
     required init?(coder: NSCoder) { fatalError() }
     override func draw(_ dirtyRect: NSRect) {
@@ -1085,6 +1167,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let step = worst >= 90 ? "100" : worst >= 67 ? "67" : worst >= 33 ? "50" : worst > 0 ? "33" : "0"
         item.button?.image = NSImage(systemSymbolName: "gauge.with.dots.needle.bottom.\(step)percent", accessibilityDescription: "LLM usage")
             ?? NSImage(systemSymbolName: "gauge.with.needle", accessibilityDescription: "LLM usage")
+        item.button?.setAccessibilityLabel("LLM Usage: " + (statuses.filter { $0.missing == nil && $0.headline != nil }
+            .map { String(format: "%@ %.0f percent %@", $0.name, shownPercent($0.headline!), percentWord) }.joined(separator: ", ")))
         item.button?.toolTip = statuses.filter { $0.missing == nil }.map { s in
             s.headline.map { String(format: "%@: %.0f%% %@", s.name, shownPercent($0), percentWord) } ?? "\(s.name): no data"
         }.joined(separator: "\n")
@@ -1093,7 +1177,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// Writes where macOS put the status item to ~/Library/Logs/LLMUsage.log, for diagnosing a hidden item.
+    var lastPlacement = ""
     func logPlacement() {
+        let sig = "\(item.isVisible)|\(item.button?.window?.frame ?? .zero)|\(item.button?.window?.occlusionState.contains(.visible) ?? false)|\(NSScreen.screens.map(\.frame))"
+        guard sig != lastPlacement else { return }
+        lastPlacement = sig
         var lines = ["\(Date()) visible=\(item.isVisible) length=\(item.length) titleWidth=\(item.button?.attributedTitle.size().width ?? -1) agent=\(launchedByAgent) xpc=\(ProcessInfo.processInfo.environment["XPC_SERVICE_NAME"] ?? "-")"]
         if let w = item.button?.window {
             lines.append("  item window frame=\(w.frame) onScreen=\(w.screen?.localizedName ?? "none") occluded=\(!w.occlusionState.contains(.visible))")
@@ -1178,6 +1266,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         rt.toolTip = "Off: read-only. On: renews Claude Code and Codex sign-ins when they expire and saves them back"
         menu.addItem(rt)
         menu.addItem(.separator())
+        let about = NSMenuItem(title: "About LLM Usage", action: #selector(showAbout), keyEquivalent: "")
+        about.target = self
+        menu.addItem(about)
+        let upd = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "")
+        upd.target = self
+        upd.toolTip = "Asks GitHub for the latest release. The app never checks on its own."
+        menu.addItem(upd)
         menu.addItem(NSMenuItem(title: "Quit LLM Usage", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
     }
 
@@ -1225,6 +1320,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         a.runModal()
     }
 
+    @objc func showAbout() {
+        let credits = NSMutableAttributedString(string: "How much of your AI coding allowances you've used, in the menu bar.\nRead-only by default. No account, no telemetry.\n\n",
+            attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor])
+        credits.append(NSAttributedString(string: "github.com/\(projectRepo)", attributes: [.font: NSFont.systemFont(ofSize: 11), .link: URL(string: "https://github.com/\(projectRepo)")!]))
+        credits.append(NSAttributedString(string: "\nMIT licence. Logos belong to their owners.", attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor]))
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "LLM Usage", .applicationVersion: appVersion, .version: "", .credits: credits])
+    }
+
+    /// Manual only: one request to GitHub's public releases API when the user asks. Nothing is sent but the request.
+    @objc func checkForUpdates() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            var latest: (version: String, url: URL)? = nil
+            var failure: String? = nil
+            do {
+                let (c, d) = try http("https://api.github.com/repos/\(projectRepo)/releases?per_page=10", headers: ["Accept": "application/vnd.github+json", "User-Agent": "LLM-Usage/\(appVersion)"])
+                guard c == 200, let list = try JSONSerialization.jsonObject(with: d) as? [[String: Any]] else { throw HTTPError.status(c, "GitHub didn't return a release list") }
+                let releases = list.filter { $0["draft"] as? Bool != true }.compactMap { r -> (String, URL)? in
+                    guard let tag = r["tag_name"] as? String, let u = (r["html_url"] as? String).flatMap(URL.init(string:)) else { return nil }
+                    return (tag.hasPrefix("v") ? String(tag.dropFirst()) : tag, u)
+                }
+                latest = releases.max { isNewer($1.0, than: $0.0) }
+            } catch { failure = "\(error)" }
+            DispatchQueue.main.async {
+                let a = NSAlert()
+                if let f = failure { a.messageText = "Couldn't check for updates"; a.informativeText = f }
+                else if let l = latest, isNewer(l.version, than: appVersion) {
+                    a.messageText = "LLM Usage \(l.version) is available"
+                    a.informativeText = "You have \(appVersion). The release page has the download and what changed."
+                    a.addButton(withTitle: "Open Release Page"); a.addButton(withTitle: "Later")
+                    NSApp.activate(ignoringOtherApps: true)
+                    if a.runModal() == .alertFirstButtonReturn { NSWorkspace.shared.open(l.url) }
+                    return
+                } else { a.messageText = "You're up to date"; a.informativeText = "LLM Usage \(appVersion) is the latest version." }
+                NSApp.activate(ignoringOtherApps: true)
+                a.runModal()
+            }
+        }
+    }
+
     @objc func toggleRemaining() {
         UserDefaults.standard.set(!showRemaining, forKey: "showRemaining")
         updateTitle(); rebuildMenu()
@@ -1247,23 +1382,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         do {
             if LoginAgent.isEnabled { LoginAgent.disable() } else { try LoginAgent.enable() }
         } catch {
-            let a = NSAlert(); a.messageText = "Couldn't change login item"; a.informativeText = "\(error)"; a.runModal()
+            let a = NSAlert(); a.messageText = "Couldn't turn on Launch at Login"; a.informativeText = error.localizedDescription
+            NSApp.activate(ignoringOtherApps: true); a.runModal()
         }
         rebuildMenu()
     }
-}
-
-if let i = CommandLine.arguments.firstIndex(of: "--login"), i + 1 < CommandLine.arguments.count {
-    // `--login on|off`: toggle Launch at Login from the command line.
-    do {
-        switch CommandLine.arguments[i + 1] {
-        case "on": try LoginAgent.enable()
-        case "off": LoginAgent.disable()
-        default: break   // "status"
-        }
-        print("Launch at Login: \(LoginAgent.isEnabled ? "enabled" : "disabled"), launchd job \(LoginAgent.isLoaded ? "loaded" : "not loaded")")
-        exit(0)
-    } catch { print("Failed: \(error)"); exit(1) }
 }
 
 if let i = CommandLine.arguments.firstIndex(of: "--render-marks"), i + 1 < CommandLine.arguments.count {
@@ -1279,8 +1402,232 @@ if let i = CommandLine.arguments.firstIndex(of: "--render-marks"), i + 1 < Comma
     exit(0)
 }
 
+let projectRepo = "d0s1nt/llm-usage"
+let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "dev"
+/// Numeric dotted-version comparison: "0.10.0" is newer than "0.9.2"; any pre-release suffix is ignored.
+func isNewer(_ a: String, than b: String) -> Bool {
+    func parts(_ v: String) -> [Int] { v.split(separator: "-").first.map { $0.split(separator: ".").map { Int($0) ?? 0 } } ?? [] }
+    let x = parts(a), y = parts(b)
+    for i in 0..<max(x.count, y.count) {
+        let l = i < x.count ? x[i] : 0, r = i < y.count ? y[i] : 0
+        if l != r { return l > r }
+    }
+    return false
+}
+
+/// The app icon, drawn in code (no SF Symbols: Apple's licence doesn't allow them in app icons).
+enum AppIcon {
+    static func image(_ px: CGFloat) -> NSImage {
+        NSImage(size: NSSize(width: px, height: px), flipped: false) { r in
+            let s = r.width
+            // macOS icon grid: the tile is ~80% of the canvas with a soft shadow below.
+            let tile = r.insetBy(dx: s * 0.098, dy: s * 0.098).offsetBy(dx: 0, dy: s * 0.008)
+            let shape = NSBezierPath(roundedRect: tile, xRadius: tile.width * 0.225, yRadius: tile.width * 0.225)
+            NSGraphicsContext.saveGraphicsState()
+            let sh = NSShadow(); sh.shadowColor = NSColor.black.withAlphaComponent(0.28); sh.shadowBlurRadius = s * 0.025; sh.shadowOffset = NSSize(width: 0, height: -s * 0.012)
+            sh.set()
+            NSColor.black.setFill(); shape.fill()
+            NSGraphicsContext.restoreGraphicsState()
+            NSGradient(colors: [NSColor(srgbRed: 0.20, green: 0.18, blue: 0.52, alpha: 1), NSColor(srgbRed: 0.05, green: 0.42, blue: 0.62, alpha: 1)])!.draw(in: shape, angle: -90)
+            // Gauge: a 240° arc graded green → amber → red, a needle at about two thirds, and a hub.
+            let c = NSPoint(x: tile.midX, y: tile.midY - tile.height * 0.06)
+            let radius = tile.width * 0.32, lw = tile.width * 0.075
+            let start: CGFloat = 210, sweep: CGFloat = 240, steps = 60
+            for i in 0..<steps {
+                let t = CGFloat(i) / CGFloat(steps)
+                let col = t < 0.5 ? NSColor(srgbRed: 0.30 + t * 1.3, green: 0.85, blue: 0.45 - t * 0.6, alpha: 1)
+                                  : NSColor(srgbRed: 0.97, green: 0.85 - (t - 0.5) * 1.3, blue: 0.15, alpha: 1)
+                let seg = NSBezierPath()
+                seg.appendArc(withCenter: c, radius: radius, startAngle: start - sweep * t, endAngle: start - sweep * (t + 1.0 / CGFloat(steps)) - 0.6, clockwise: true)
+                seg.lineWidth = lw; seg.lineCapStyle = i == 0 || i == steps - 1 ? .round : .butt
+                col.setStroke(); seg.stroke()
+            }
+            let angle = (start - sweep * 0.68) * .pi / 180
+            let tip = NSPoint(x: c.x + cos(angle) * radius * 0.82, y: c.y + sin(angle) * radius * 0.82)
+            let needle = NSBezierPath(); needle.move(to: c); needle.line(to: tip)
+            needle.lineWidth = tile.width * 0.04; needle.lineCapStyle = .round
+            NSColor.white.setStroke(); needle.stroke()
+            NSColor.white.setFill()
+            NSBezierPath(ovalIn: NSRect(x: c.x - lw * 0.75, y: c.y - lw * 0.75, width: lw * 1.5, height: lw * 1.5)).fill()
+            return true
+        }
+    }
+    static func png(_ px: Int) -> Data? {
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: px, pixelsHigh: px, bitsPerSample: 8, samplesPerPixel: 4,
+                                         hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { return nil }
+        rep.size = NSSize(width: px, height: px)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        image(CGFloat(px)).draw(in: NSRect(x: 0, y: 0, width: px, height: px))
+        NSGraphicsContext.restoreGraphicsState()
+        return rep.representation(using: .png, properties: [:])
+    }
+}
+
+if let i = CommandLine.arguments.firstIndex(of: "--render-icon"), i + 1 < CommandLine.arguments.count {
+    // Writes an .iconset folder; `iconutil -c icns` turns it into AppIcon.icns (see build.sh).
+    let dir = URL(fileURLWithPath: CommandLine.arguments[i + 1])
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    for base in [16, 32, 128, 256, 512] {
+        for scale in [1, 2] {
+            let name = scale == 1 ? "icon_\(base)x\(base).png" : "icon_\(base)x\(base)@2x.png"
+            try? AppIcon.png(base * scale)?.write(to: dir.appendingPathComponent(name))
+        }
+    }
+    print("wrote \(dir.path)")
+    exit(0)
+}
+
+if let i = CommandLine.arguments.firstIndex(of: "--render-preview"), i + 1 < CommandLine.arguments.count {
+    // Renders the dropdown with invented demo figures to a PNG, for the README. No real data is read.
+    let day: TimeInterval = 86400
+    func w(_ l: String, _ p: Double, _ d: Double?, headline: Bool = true) -> UsageWindow { UsageWindow(label: l, usedPercent: p, resetsAt: d.map { Date().addingTimeInterval($0 * day + 600) }, headline: headline) }
+    let demo: [ProviderStatus] = [
+        ProviderStatus(name: "Claude", short: "C", plan: "Max", windows: [w("Weekly (all)", 46, 2.6), w("Weekly Opus", 18, 2.6)], note: "This week by surface: Claude Code 81% · Chats 19%"),
+        ProviderStatus(name: "Codex", short: "X", plan: "Pro", windows: [w("Weekly limit", 31, 4.2)]),
+        ProviderStatus(name: "Grok", short: "K", plan: "SuperGrok", windows: [w("Weekly limit", 12, 5.1)]),
+        ProviderStatus(name: "Grok Bot", short: "B", plan: "Grok Bot Plan", windows: [w("Included usage", 27, 6.3), w("On-demand cap", 40, nil, headline: false)]),
+        ProviderStatus(name: "Muse", short: "M", plan: "Muse Code Power Usage", windows: [w("Weekly", 64, 3.4), w("5-hour window", 92, 0.08, headline: false)]),
+    ]
+    let dark = CommandLine.arguments.contains("--dark")
+    let appearance = NSAppearance(named: dark ? .darkAqua : .aqua)!
+    var rows: [NSView] = []
+    for st in demo {
+        rows.append(HeaderRowView(st))
+        rows += st.windows.map { UsageRowView($0) as NSView }
+        if let n = st.note { rows.append(NoteRowView(n)) }
+        let sep = NSBox(frame: NSRect(x: 0, y: 0, width: menuWidth, height: 9)); sep.boxType = .custom; sep.borderWidth = 0; sep.fillColor = .clear
+        let line = NSBox(frame: NSRect(x: rowInset, y: 4, width: menuWidth - rowInset * 2, height: 1)); line.boxType = .custom; line.borderWidth = 0; line.fillColor = .separatorColor
+        sep.addSubview(line); rows.append(sep)
+    }
+    rows.removeLast()
+    let pad: CGFloat = 8
+    let height = rows.reduce(0) { $0 + $1.frame.height } + pad * 2
+    let root = NSView(frame: NSRect(x: 0, y: 0, width: menuWidth, height: height))
+    root.appearance = appearance
+    root.wantsLayer = true
+    root.layer?.backgroundColor = (dark ? NSColor(white: 0.17, alpha: 1) : NSColor(white: 0.97, alpha: 1)).cgColor
+    root.layer?.cornerRadius = 10
+    var y = height - pad
+    for r in rows { y -= r.frame.height; r.setFrameOrigin(NSPoint(x: 0, y: y)); root.addSubview(r) }
+    let window = NSWindow(contentRect: root.frame, styleMask: .borderless, backing: .buffered, defer: false)
+    window.contentView = root
+    window.appearance = appearance
+    let scale: CGFloat = 2
+    guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(menuWidth * scale), pixelsHigh: Int(height * scale), bitsPerSample: 8, samplesPerPixel: 4,
+                                     hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { exit(1) }
+    rep.size = root.frame.size
+    appearance.performAsCurrentDrawingAppearance { root.cacheDisplay(in: root.bounds, to: rep) }
+    try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: CommandLine.arguments[i + 1]))
+    print("wrote \(CommandLine.arguments[i + 1])")
+    exit(0)
+}
+
 /// Display order in the menu bar and the dropdown.
 let allProviders: [Provider] = [ClaudeProvider(), CodexProvider(), GeminiProvider(), GrokProvider(), GrokBotProvider(), MuseProvider()]
+
+// MARK: - Self-test: every parser against synthetic responses. No network, files or credentials; the fixtures
+// below are invented and must stay that way (check-secrets.sh scans them). Run with --selftest; CI runs it too.
+
+enum SelfTest {
+    static var failures = 0
+    static var passes = 0
+    static func check(_ ok: Bool, _ what: String, line: UInt = #line) {   // no #file: it would embed the build path
+        if ok { passes += 1 } else { failures += 1; print("FAIL line \(line): \(what)") }
+    }
+    static func obj(_ text: String) -> [String: Any] {
+        (try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? [String: Any] ?? [:]
+    }
+    static func blank(_ name: String) -> ProviderStatus { ProviderStatus(name: name, short: "?") }
+
+    static func run() -> Int32 {
+        // Claude: current `limits` array, 5-hour window excluded from the headline.
+        var c = blank("Claude")
+        ClaudeProvider.parse(obj("""
+        {"limits":[{"kind":"weekly_all","percent":42,"resets_at":"2030-01-02T03:04:05Z"},
+                   {"kind":"weekly_scoped","percent":10,"scope":{"model":{"display_name":"Opus"}}},
+                   {"kind":"five_hour","percent":80}],
+         "seven_day_breakdown":{"rows":[{"display_name":"Claude Code","percent":70},{"display_name":"Chats","percent":30},{"display_name":"Cowork","percent":0}]}}
+        """), into: &c)
+        check(c.windows.map(\.label) == ["Weekly (all)", "Weekly Opus", "5-hour"], "claude labels \(c.windows.map(\.label))")
+        check(c.headline == 42, "claude headline ignores 5-hour: \(String(describing: c.headline))")
+        check(c.windows.first?.resetsAt == iso("2030-01-02T03:04:05Z"), "claude reset date")
+        check(c.note == "This week by surface: Claude Code 70% · Chats 30%", "claude breakdown note: \(c.note ?? "nil")")
+        // Claude: legacy shape.
+        var cl = blank("Claude")
+        ClaudeProvider.parse(obj(#"{"five_hour":{"utilization":5},"seven_day":{"utilization":33.5}}"#), into: &cl)
+        check(cl.windows.map(\.label) == ["5-hour", "Weekly (all)"] && cl.headline == 33.5, "claude legacy")
+        var ce = blank("Claude"); ClaudeProvider.parse([:], into: &ce)
+        check(ce.windows.isEmpty && ce.note == "No limit windows reported", "claude empty")
+
+        // Codex: internal plan name mapped, weekly window, notes.
+        var x = blank("Codex")
+        CodexProvider.parse(obj("""
+        {"plan_type":"prolite","email":"someone@example.invalid",
+         "rate_limit":{"limit_reached":false,"primary_window":{"used_percent":11,"limit_window_seconds":604800,"reset_at":1893456000},"secondary_window":null},
+         "credits":{"has_credits":false,"unlimited":false,"balance":"0"},
+         "rate_limit_reset_credits":{"available_count":2},"spend_control":{"reached":false}}
+        """), into: &x)
+        check(x.plan == "Pro 100 · someone@example.invalid", "codex plan: \(x.plan ?? "nil")")
+        check(x.windows.count == 1 && x.windows[0].label == "Weekly limit" && x.headline == 11, "codex window \(x.windows.map(\.label))")
+        check(x.windows[0].resetsAt == Date(timeIntervalSince1970: 1893456000), "codex reset")
+        check(x.note == "2 limit resets available", "codex note: \(x.note ?? "nil")")
+        var xu = blank("Codex")
+        CodexProvider.parse(obj(#"{"plan_type":"enterprise_v2","rate_limit":{"limit_reached":true,"primary_window":{"used_percent":100,"limit_window_seconds":18000}}}"#), into: &xu)
+        check(xu.plan == "Enterprise_V2" && xu.windows.first?.label == "5-hour limit" && (xu.note ?? "").hasPrefix("Limit reached"), "codex unknown plan: \(xu.plan ?? "nil") \(xu.note ?? "nil")")
+
+        // Gemini: remaining fraction becomes used percent, sorted by model.
+        var g = blank("Gemini")
+        GeminiProvider.parse(quota: obj(#"{"buckets":[{"modelId":"gemini-pro","remainingFraction":0.25},{"modelId":"gemini-flash","remainingFraction":1.0,"resetTime":"2030-01-01T00:00:00Z"},{"remainingFraction":0.5}]}"#), into: &g)
+        check(g.windows.map(\.label) == ["flash", "pro"] && g.windows.map(\.usedPercent) == [0, 75], "gemini buckets \(g.windows.map(\.label)) \(g.windows.map(\.usedPercent))")
+
+        // Grok Build: proto JSON omits zero fields, so a missing percent means 0%.
+        var k = blank("Grok")
+        GrokProvider.parse(billing: obj("""
+        {"subscription_tier":"SuperGrok Heavy","config":{"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","end":"2030-01-08T00:00:00Z"},
+         "onDemandCap":{"val":10},"onDemandUsed":{"val":5},"prepaidBalance":{"val":3.5}}}
+        """), into: &k)
+        check(k.plan == "SuperGrok Heavy", "grok plan")
+        check(k.windows.map(\.label) == ["Weekly limit", "Pay-as-you-go"] && k.windows.map(\.usedPercent) == [0, 50], "grok windows \(k.windows.map(\.usedPercent))")
+        check(k.headline == 0, "grok headline ignores pay-as-you-go")
+        check(k.note == "Prepaid balance: 3.50", "grok prepaid note")
+
+        // Grok Bot: on-demand cap shown but never the headline.
+        var b = blank("Grok Bot")
+        let bn = GrokBotProvider.parse(usage: obj(#"{"percentUsed":27.3,"nextResetMs":1893456000000,"grokPlanLabel":"Grok Bot Plan","isSandTrial":true,"onDemand":{"usedCents":8006,"limitCents":8000}}"#), into: &b)
+        check(b.plan == "Grok Bot Plan (trial)", "grokbot plan")
+        check(b.headline == 27.3 && b.windows.last?.usedPercent == 100, "grokbot headline \(String(describing: b.headline))")
+        check(bn == ["On-demand spend $80.06 of a $80.00 cap"], "grokbot note \(bn)")
+
+        // Muse: undocumented shape; weekly is the headline, the 5-hour window is not.
+        var m = blank("Muse")
+        MuseProvider.parse(allowance: obj(#"{"tier":"Muse Code Power Usage","window":{"usedPercent":100,"resetsAtMs":1893456000000},"weekly":{"usedPercent":51,"resetsAtMs":1893999999000},"asOfMs":1}"#), into: &m)
+        check(m.plan == "Muse Code Power Usage", "muse plan")
+        check(Set(m.windows.map(\.label)) == ["5-hour window", "Weekly"] && m.headline == 51, "muse windows \(m.windows.map(\.label)) headline \(String(describing: m.headline))")
+        var mf = blank("Muse")
+        MuseProvider.parse(allowance: obj(#"{"weekly":{"remainingFraction":0.75}}"#), into: &mf)
+        check(mf.windows.first?.usedPercent == 25, "muse fraction")
+
+        // Helpers.
+        check(windowLabel(seconds: 604800) == "Weekly" && windowLabel(seconds: 18000) == "5-hour", "window labels")
+        check(base32Decode("nbswy3dp") == "hello", "base32")
+        check(isNewer("0.10.0", than: "0.9.2") && !isNewer("0.2.0", than: "0.2.0") && isNewer("1.0", than: "0.9.9-beta") && !isNewer("0.1.1", than: "0.2.0"), "version comparison")
+        check(iso("2030-01-02T03:04:05.123Z") != nil && iso("not a date") == nil, "iso dates")
+        check(ProviderStatus(name: "n", short: "n", windows: [UsageWindow(label: "a", usedPercent: 99, resetsAt: nil, headline: false)]).headline == nil, "non-headline windows never drive the number")
+
+        print("selftest: \(passes) passed, \(failures) failed (\(ProcessInfo.processInfo.machineHardwareName))")
+        return failures == 0 ? 0 : 1
+    }
+}
+
+extension ProcessInfo {
+    var machineHardwareName: String {
+        var u = utsname(); uname(&u)
+        return withUnsafePointer(to: &u.machine) { $0.withMemoryRebound(to: CChar.self, capacity: 256) { String(cString: $0) } }
+    }
+}
+
+if CommandLine.arguments.contains("--selftest") { exit(SelfTest.run()) }
 
 if CommandLine.arguments.contains("--setup") {
     // Headless version of the Setup Check window.
@@ -1321,7 +1668,25 @@ enum LoginAgent {
     static var isLoaded: Bool { run("/bin/launchctl", ["print", target]).0 == 0 }
     @discardableResult static func launchctl(_ args: [String]) -> (Int32, String) { run("/bin/launchctl", args) }
 
+    /// Where the app is running from, if that's somewhere a login item can't sensibly point: macOS "translocates"
+    /// quarantined apps opened straight from Downloads to a random read-only path, and a disk image unmounts.
+    static var unsuitableLocation: String? {
+        let path = Bundle.main.bundlePath
+        if path.contains("/AppTranslocation/") { return "macOS is running LLM Usage from a temporary copy because it was opened where it was downloaded." }
+        if path.hasPrefix("/Volumes/") { return "LLM Usage is running from a disk image." }
+        return nil
+    }
+    /// The executable the installed launch agent starts, if any.
+    static var installedProgram: String? {
+        guard let d = FileManager.default.contents(atPath: plistPath),
+              let p = try? PropertyListSerialization.propertyList(from: d, format: nil) as? [String: Any] else { return nil }
+        return (p["ProgramArguments"] as? [String])?.first
+    }
+
     static func enable() throws {
+        if let why = unsuitableLocation {
+            throw NSError(domain: "LoginAgent", code: 1, userInfo: [NSLocalizedDescriptionKey: why + " Move LLM Usage to your Applications folder, open it from there, then turn on Launch at Login."])
+        }
         guard let exe = Bundle.main.executablePath else { return }
         let plist: [String: Any] = [
             "Label": label, "ProgramArguments": [exe], "RunAtLoad": true,
@@ -1344,7 +1709,22 @@ enum LoginAgent {
     }
 }
 let launchedByAgent = ProcessInfo.processInfo.environment["XPC_SERVICE_NAME"] == LoginAgent.label
-let headlessRun = ["--print", "--setup", "--login", "--render-marks"].contains { CommandLine.arguments.contains($0) }
+let headlessRun = ["--print", "--setup", "--selftest", "--login", "--render-marks", "--render-icon", "--render-preview"].contains { CommandLine.arguments.contains($0) }
+
+// Must come after LoginAgent and its globals: top-level code runs in file order, and touching a global before its
+// line has run crashes (this handler once sat above them and segfaulted).
+if let i = CommandLine.arguments.firstIndex(of: "--login"), i + 1 < CommandLine.arguments.count {
+    // `--login on|off`: toggle Launch at Login from the command line.
+    do {
+        switch CommandLine.arguments[i + 1] {
+        case "on": try LoginAgent.enable()
+        case "off": LoginAgent.disable()
+        default: break   // "status"
+        }
+        print("Launch at Login: \(LoginAgent.isEnabled ? "enabled" : "disabled"), launchd job \(LoginAgent.isLoaded ? "loaded" : "not loaded")")
+        exit(0)
+    } catch { print("Failed: \(error)"); exit(1) }
+}
 
 // Single instance. The launchd-managed copy is the one that must survive, so it displaces any other;
 // a manual launch defers to a running copy. Exit 0 so launchd doesn't count it as a crash.
@@ -1355,6 +1735,13 @@ if !headlessRun {
         if launchedByAgent { others.forEach { $0.terminate() }; Thread.sleep(forTimeInterval: 0.5) }
         else { exit(0) }
     }
+}
+
+// The app was moved since Launch at Login was turned on: point the agent at where it lives now.
+if !headlessRun && LoginAgent.isEnabled, LoginAgent.unsuitableLocation == nil,
+   let exe = Bundle.main.executablePath, LoginAgent.installedProgram != exe {
+    LoginAgent.launchctl(["bootout", LoginAgent.target])
+    try? LoginAgent.enable()
 }
 
 // A manual launch (e.g. `open` after a rebuild) while the agent is enabled hands over to a launchd-managed copy,

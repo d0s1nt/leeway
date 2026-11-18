@@ -1,0 +1,42 @@
+name: Bug report
+description: Something isn't detected, shows the wrong figure, or misbehaves
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Never paste tokens, `auth.json` contents or keychain data here.** Remove your email address from any output before posting.
+  - type: input
+    id: version
+    attributes:
+      label: LLM Usage version
+      description: About LLM Usage in the dropdown shows it.
+      placeholder: "0.2.0"
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version and Mac
+      placeholder: "macOS 15.4, Apple Silicon"
+    validations:
+      required: true
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Which provider?
+      multiple: true
+      options: [Claude, Codex, Gemini, Grok Build, Grok Bot, Muse, The app itself]
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+      description: If a figure looks wrong, say what the vendor's own usage screen shows at the same time.
+    validations:
+      required: true
+  - type: textarea
+    id: setup
+    attributes:
+      label: Setup check output
+      description: 'Run `"/Applications/LLM Usage.app/Contents/MacOS/LLMUsage" --setup` and paste the result, with your email address removed.'
+      render: text

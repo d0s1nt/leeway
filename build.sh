@@ -18,7 +18,9 @@ VERSION="$(cat VERSION)"
 
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 rm -rf "$APP/Contents/Resources/icons" "$APP/Contents/Library"
+xattr -cr "$APP" 2>/dev/null || true
 cp -R icons "$APP/Contents/Resources/icons"
+cp AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 # Universal binary: Apple Silicon and Intel, macOS 13+.
 TMP="$(mktemp -d)"
 for arch in arm64 x86_64; do
@@ -36,6 +38,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleVersion</key><string>$VERSION</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundleExecutable</key><string>LLMUsage</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>NSHumanReadableCopyright</key><string>© 2026 Cynaptix. MIT licence.</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSUIElement</key><true/>
