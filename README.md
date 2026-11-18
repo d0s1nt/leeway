@@ -84,7 +84,46 @@ spend caps appear as rows but don't drive it.
 | Compact Menu Bar | On by default: one provider in the menu bar. Off: all of them |
 | Show Remaining | Counts down what's left, like the vendors' own screens |
 | Renew Expired Sign-ins | Off by default. See below |
+| Connect AI Tools… | Lets Grok Bot, Claude Code, Codex, Grok and other agents query usage (below) |
 | About / Check for Updates… | Version, licence, and a manual check for a newer release |
+
+## Use it from AI agents
+
+Agents can ask how much allowance is left before starting big work, or which tool
+has the most headroom. The app includes an [MCP](https://modelcontextprotocol.io)
+server with two read-only tools:
+
+- **`get_usage`**: every provider's used and remaining percentage, each window, and
+  when it resets. Optionally one provider.
+- **`best_available`**: the tools that are set up, ranked by remaining allowance.
+
+Agents never see your account email or any token. The server reuses the figures the
+menu bar app fetched in the last 10 minutes, so frequent questions don't hit vendor
+rate limits.
+
+**The easy way:** choose **Connect AI Tools…** in the dropdown. It adds the server to
+Claude Code, Codex and the Grok CLI using each tool's own command, and copies the
+settings for apps you configure by hand.
+
+**Grok Bot, Cursor and other apps:** add a custom MCP server of the local command
+(stdio) type, with:
+
+| Field | Value |
+|---|---|
+| Name | `llm-usage` |
+| Command | `/Applications/LLM Usage.app/Contents/MacOS/LLMUsage` |
+| Arguments | `--mcp` |
+
+**By hand, from a terminal:**
+
+    BIN="/Applications/LLM Usage.app/Contents/MacOS/LLMUsage"
+    claude mcp add --scope user llm-usage -- "$BIN" --mcp
+    codex mcp add llm-usage -- "$BIN" --mcp
+    grok mcp add --scope user llm-usage "$BIN" -- --mcp
+
+**Without MCP:** `"$BIN" --json` prints the same data, and the running app keeps it
+current in `~/Library/Application Support/app.llmusage.menubar/usage.json`, readable
+only by you.
 
 ## Privacy and what it touches
 
@@ -101,11 +140,12 @@ By default the app only reads. Specifically:
 - **Muse:** the output of `muse usage --json`, and Muse's session journal when its
   quota is exhausted.
 
-Each token goes only to the vendor that issued it. The only other network request
+Each token goes only to the vendor that issued it. Agents connected through MCP get
+usage figures and plan names only. The only other network request
 is **Check for Updates…**, which asks GitHub's public API for the release list, and
 only when you choose it.
 
-It writes its own preferences, a small log at `~/Library/Logs/LLMUsage.log` (where
+It writes its own preferences, the usage snapshot described above, a small log at `~/Library/Logs/LLMUsage.log` (where
 the menu bar item is placed, only when that changes), and a launch agent in
 `~/Library/LaunchAgents` if you turn on Launch at Login.
 
@@ -157,6 +197,7 @@ run in the current window. Send one message in Muse.
     "$BIN" --print          # every provider's figures
     "$BIN" --print C X      # only some providers, by letter or name
     "$BIN" --selftest       # parser tests against built-in synthetic data
+    "$BIN" --json           # machine-readable usage, as agents see it
     "$BIN" --login status   # or on, off
 
 When reporting a problem, include the `--setup` output, but remove your email
@@ -170,6 +211,11 @@ address from it first.
 
        defaults delete app.llmusage.menubar
        rm -f ~/Library/Logs/LLMUsage.log ~/Library/LaunchAgents/app.llmusage.menubar.plist
+       rm -rf ~/Library/Application\ Support/app.llmusage.menubar
+
+4. If you connected AI tools, remove it from each, for example
+   `claude mcp remove llm-usage`, `codex mcp remove llm-usage` or
+   `grok mcp remove llm-usage`, and delete it from Grok Bot's MCP settings.
 
 It never changed anything belonging to the AI tools, unless you turned on Renew
 Expired Sign-ins.

@@ -19,6 +19,7 @@ struct ProviderStatus {
     var plan: String? = nil
     var windows: [UsageWindow] = []
     var error: String? = nil
+    var account: String? = nil        // e.g. the signed-in email; shown in the menu, never in JSON or MCP output
     var missing: String? = nil        // the tool isn't installed or signed in on this Mac: left out of the menu, listed in Setup Check
     var link: URL? = nil
     var note: String? = nil
@@ -26,6 +27,7 @@ struct ProviderStatus {
     var staleSince: Date? = nil       // set when we're showing an older result because the latest refresh failed
 
     /// Headline figure for the menu bar: the most-used window.
+    var displayPlan: String? { [plan, account].compactMap { $0 }.joined(separator: " · ").nilIfEmpty }
     var headline: Double? { windows.filter(\.headline).map(\.usedPercent).max() }
 }
 
@@ -199,6 +201,10 @@ func run(_ cmd: String, _ args: [String], timeout: TimeInterval = 30) -> (Int32,
 }
 
 func home(_ rel: String) -> String { NSHomeDirectory() + "/" + rel }
+/// Set in Info.plist by build.sh (BUNDLE_ID); also the launchd label, defaults domain and snapshot folder.
+/// Defined up here on purpose: this file runs top to bottom, and a global used before its line has run crashes.
+let bundleID = Bundle.main.bundleIdentifier ?? "llm-usage"
+extension String { var nilIfEmpty: String? { isEmpty ? nil : self } }
 
 func jwtExpiry(_ token: String) -> Date? {
     let parts = token.split(separator: ".")
@@ -756,7 +762,7 @@ extension CodexProvider {
         let planNames = ["prolite": "Pro 100", "pro": "Pro", "plus": "Plus", "free": "Free", "team": "Team", "business": "Business", "enterprise": "Enterprise", "edu": "Edu", "go": "Go"]
         st.plan = (o["plan_type"] as? String).map { planNames[$0.lowercased()] ?? $0.capitalized }
         // Which ChatGPT account the CLI is signed into matters when the numbers look wrong.
-        if let email = o["email"] as? String, !email.isEmpty { st.plan = [st.plan, email].compactMap { $0 }.joined(separator: " · ") }
+        if let email = o["email"] as? String, !email.isEmpty { st.account = email }
         if let rl = o["rate_limit"] as? [String: Any] {
             for key in ["primary_window", "secondary_window"] {
                 guard let w = rl[key] as? [String: Any], let used = w["used_percent"] as? Double else { continue }
@@ -975,7 +981,7 @@ final class HeaderRowView: LinkRowView {
         let name = NSAttributedString(string: status.name, attributes: [.font: NSFont.boldSystemFont(ofSize: 13), .foregroundColor: NSColor.labelColor])
         name.draw(at: NSPoint(x: rowInset + 21, y: 6))
         var x = rowInset + 21 + name.size().width + 7
-        if let plan = status.plan {
+        if let plan = status.displayPlan {
             let p = NSAttributedString(string: plan, attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor])
             p.draw(at: NSPoint(x: x, y: 7)); x += p.size().width
         }
@@ -1112,6 +1118,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             DispatchQueue.main.async {
                 self.statuses = results.compactMap { $0 }.map { self.merge($0) }
                 self.lastUpdate = Date()
+                let snapshot = self.statuses
+                DispatchQueue.global(qos: .utility).async { UsageExport.writeSnapshot(snapshot) }
                 self.refreshing = false
                 self.updateTitle()
                 self.rebuildMenu()
@@ -1266,6 +1274,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         rt.toolTip = "Off: read-only. On: renews Claude Code and Codex sign-ins when they expire and saves them back"
         menu.addItem(rt)
         menu.addItem(.separator())
+        let connect = NSMenuItem(title: "Connect AI Tools…", action: #selector(connectTools), keyEquivalent: "")
+        connect.target = self
+        connect.toolTip = "Let Grok Bot, Claude Code, Codex, Grok and other agents ask how much allowance is left"
+        menu.addItem(connect)
         let about = NSMenuItem(title: "About LLM Usage", action: #selector(showAbout), keyEquivalent: "")
         about.target = self
         menu.addItem(about)
@@ -1300,8 +1312,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for s in statuses {
             if let m = s.missing { lines.append("○  \(s.name): not set up. \(m)") }
             else if let e = s.error { lines.append("⚠︎  \(s.name): found, but \(e)") }
-            else if s.windows.isEmpty { lines.append("●  \(s.name): found\(s.plan.map { " (\($0))" } ?? ""), no usage figures yet. \(s.note ?? "")") }
-            else { lines.append("✓  \(s.name): working\(s.plan.map { " (\($0))" } ?? "")") }
+            else if s.windows.isEmpty { lines.append("●  \(s.name): found\(s.displayPlan.map { " (\($0))" } ?? ""), no usage figures yet. \(s.note ?? "")") }
+            else { lines.append("✓  \(s.name): working\(s.displayPlan.map { " (\($0))" } ?? "")") }
         }
         let found = statuses.filter { $0.missing == nil }.count
         lines.append("")
@@ -1318,6 +1330,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         a.addButton(withTitle: "OK")
         NSApp.activate(ignoringOtherApps: true)
         a.runModal()
+    }
+
+    /// Registers the MCP server with each installed agent CLI using that tool's own command, and puts the generic
+    /// settings on the clipboard for apps configured by hand (Grok Bot, Cursor).
+    @objc func connectTools() {
+        if let why = LoginAgent.unsuitableLocation {
+            let a = NSAlert(); a.messageText = "Move LLM Usage to Applications first"
+            a.informativeText = why + " AI tools need a permanent path to it."
+            NSApp.activate(ignoringOtherApps: true); a.runModal(); return
+        }
+        let exe = MCPServer.executable
+        let clis: [(name: String, tool: String, args: [String])] = [
+            ("Claude Code", "claude", ["mcp", "add", "--scope", "user", mcpServerName, "--", exe, "--mcp"]),
+            ("Codex", "codex", ["mcp", "add", mcpServerName, "--", exe, "--mcp"]),
+            ("Grok", "grok", ["mcp", "add", "--scope", "user", mcpServerName, exe, "--", "--mcp"]),
+        ]
+        let found = clis.compactMap { c in Tools.find(c.tool, extra: [home(".grok/bin")]).map { (c.name, $0, c.args) } }
+        let a = NSAlert()
+        a.messageText = "Connect AI tools"
+        a.informativeText = """
+        AI agents can ask LLM Usage how much allowance each tool has left, through MCP. Read-only; agents never see your account email.
+
+        \(found.isEmpty ? "No agent command-line tools were found to add it to automatically." : "Add to: " + found.map(\.0).joined(separator: ", ") + ", using each tool's own mcp add command.")
+
+        For Grok Bot, Cursor and other apps: copy the settings, then add them as a custom MCP server in that app's settings.
+        """
+        if !found.isEmpty { a.addButton(withTitle: "Add to \(found.count == 1 ? found[0].0 : "\(found.count) Tools")") }
+        a.addButton(withTitle: "Copy Settings")
+        a.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        let r = a.runModal()
+        let addIndex: NSApplication.ModalResponse = .alertFirstButtonReturn
+        let copyIndex: NSApplication.ModalResponse = found.isEmpty ? .alertFirstButtonReturn : .alertSecondButtonReturn
+        if r == copyIndex {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(MCPServer.configJSON, forType: .string)
+            let c = NSAlert(); c.messageText = "Settings copied"
+            c.informativeText = "Paste them into the app's MCP settings. If it asks for fields separately:\n\nName: \(mcpServerName)\nType: stdio (command)\nCommand: \(exe)\nArguments: --mcp"
+            c.runModal()
+        } else if r == addIndex && !found.isEmpty {
+            var lines: [String] = []
+            for (name, path, args) in found {
+                let (code, out) = run(path, args, timeout: 30)
+                lines.append(code == 0 ? "✓  \(name): added" : "⚠︎  \(name): \(out.split(separator: "\n").last.map(String.init) ?? "failed (\(code))")")
+            }
+            let done = NSAlert(); done.messageText = "Connected"
+            done.informativeText = lines.joined(separator: "\n") + "\n\nRestart those tools to pick it up. For Grok Bot and Cursor, use Copy Settings."
+            done.runModal()
+        }
     }
 
     @objc func showAbout() {
@@ -1523,6 +1584,183 @@ if let i = CommandLine.arguments.firstIndex(of: "--render-preview"), i + 1 < Com
     exit(0)
 }
 
+// MARK: - Machine-readable usage, for scripts and AI agents (--json, --mcp, and a snapshot file)
+
+let productName = "LLM Usage"
+let mcpServerName = "llm-usage"
+
+/// Every provider, fetched in parallel.
+func fetchAll() -> [ProviderStatus] {
+    var out = [ProviderStatus?](repeating: nil, count: allProviders.count)
+    let lock = NSLock()
+    DispatchQueue.concurrentPerform(iterations: allProviders.count) { i in
+        let r = allProviders[i].fetch()
+        lock.lock(); out[i] = r; lock.unlock()
+    }
+    return out.compactMap { $0 }
+}
+
+enum UsageExport {
+    /// Written by the menu bar app after every refresh, readable only by this user.
+    static var snapshotURL: URL {
+        URL(fileURLWithPath: home("Library/Application Support/\(bundleID)/usage.json"))
+    }
+    static func isoString(_ d: Date?) -> Any { d.map { ISO8601DateFormatter().string(from: $0) } ?? NSNull() }
+    static func id(_ name: String) -> String { name.lowercased().replacingOccurrences(of: " ", with: "-") }
+    static func round1(_ v: Double) -> Double { (v * 10).rounded() / 10 }
+
+    /// The JSON shape agents see. Deliberately excludes the signed-in account and anything credential-like.
+    static func object(_ statuses: [ProviderStatus], generated: Date = Date()) -> [String: Any] {
+        let providers: [[String: Any]] = statuses.map { s in
+            let state = s.missing != nil ? "not_set_up" : s.error != nil ? "error" : s.staleSince != nil ? "stale" : s.windows.isEmpty ? "no_data" : "ok"
+            let main = s.windows.filter(\.headline).max { $0.usedPercent < $1.usedPercent }
+            return [
+                "id": id(s.name), "name": s.name, "status": state, "plan": s.plan ?? NSNull(),
+                "used_percent": s.headline.map(round1) ?? NSNull(),
+                "remaining_percent": s.headline.map { round1(max(0, 100 - $0)) } ?? NSNull(),
+                "resets_at": isoString(main?.resetsAt),
+                "windows": s.windows.map { w -> [String: Any] in [
+                    "label": w.label, "used_percent": round1(w.usedPercent), "remaining_percent": round1(max(0, 100 - w.usedPercent)),
+                    "resets_at": isoString(w.resetsAt), "counts_toward_headline": w.headline] },
+                "message": (s.missing ?? s.error ?? s.note) as Any? ?? NSNull(),
+                "data_as_of": isoString(s.staleSince ?? s.fetchedAt),
+            ]
+        }
+        return ["app": productName, "version": appVersion, "generated_at": isoString(generated), "providers": providers]
+    }
+    static func data(_ statuses: [ProviderStatus], pretty: Bool = true) -> Data {
+        (try? JSONSerialization.data(withJSONObject: object(statuses), options: pretty ? [.prettyPrinted, .sortedKeys] : [.sortedKeys])) ?? Data("{}".utf8)
+    }
+    static func writeSnapshot(_ statuses: [ProviderStatus]) {
+        let url = snapshotURL
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try data(statuses).write(to: url, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        } catch {}
+    }
+    /// The snapshot if the menu bar app wrote it within `maxAge` seconds, else a live fetch. Agents may ask often;
+    /// reusing the app's figures keeps them from hammering vendor endpoints (Anthropic rate-limits quickly).
+    static func current(maxAge: TimeInterval = 600) -> Data {
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: snapshotURL.path),
+           let m = attrs[.modificationDate] as? Date, Date().timeIntervalSince(m) < maxAge,
+           let d = try? Data(contentsOf: snapshotURL) { return d }
+        let live = fetchAll()
+        return data(live)
+    }
+}
+
+/// A Model Context Protocol server over stdio, so AI agents can ask how much allowance is left before choosing
+/// where to send work. Read-only; it reuses the menu bar app's latest figures when they're fresh.
+enum MCPServer {
+    static let protocolVersions = ["2025-06-18", "2025-03-26", "2024-11-05"]
+    static let tools: [[String: Any]] = [
+        ["name": "get_usage",
+         "title": "AI tool usage",
+         "description": "How much of each AI coding tool's allowance (Claude Code, Codex, Gemini CLI, Grok Build, Grok Bot, Muse Code) has been used on this Mac, with the remaining percentage and when each limit resets. Providers that aren't set up are listed with status not_set_up.",
+         "inputSchema": ["type": "object", "properties": ["provider": ["type": "string", "description": "Optional provider id or name, e.g. claude, codex, gemini, grok, grok-bot, muse."]], "additionalProperties": false],
+         "annotations": ["readOnlyHint": true, "openWorldHint": false]],
+        ["name": "best_available",
+         "title": "Tool with the most allowance left",
+         "description": "Ranks the AI tools that are set up on this Mac by remaining allowance, most first, so work can go where there is headroom. Optionally restrict to some providers.",
+         "inputSchema": ["type": "object", "properties": ["among": ["type": "array", "items": ["type": "string"], "description": "Optional provider ids or names to choose between."]], "additionalProperties": false],
+         "annotations": ["readOnlyHint": true, "openWorldHint": false]],
+    ]
+
+    static func usageObject(_ load: () -> Data) -> [String: Any] {
+        (try? JSONSerialization.jsonObject(with: load())) as? [String: Any] ?? [:]
+    }
+    static func matches(_ p: [String: Any], _ want: String) -> Bool {
+        let w = want.lowercased().replacingOccurrences(of: " ", with: "-")
+        return (p["id"] as? String) == w || (p["name"] as? String)?.lowercased() == want.lowercased()
+    }
+    static func text(_ o: Any) -> String {
+        String(decoding: (try? JSONSerialization.data(withJSONObject: o, options: [.prettyPrinted, .sortedKeys])) ?? Data(), as: UTF8.self)
+    }
+    static func result(_ structured: [String: Any], isError: Bool = false) -> [String: Any] {
+        ["content": [["type": "text", "text": text(structured)]], "structuredContent": structured, "isError": isError]
+    }
+
+    /// One JSON-RPC message in, at most one out (notifications get no reply). Pure apart from `load`, so it's testable.
+    static func handle(_ msg: [String: Any], load: () -> Data) -> [String: Any]? {
+        let id = msg["id"]
+        guard let method = msg["method"] as? String else { return nil }
+        if id == nil { return nil }   // notification, e.g. notifications/initialized
+        func reply(_ r: [String: Any]) -> [String: Any] { ["jsonrpc": "2.0", "id": id!, "result": r] }
+        func failure(_ code: Int, _ m: String) -> [String: Any] { ["jsonrpc": "2.0", "id": id!, "error": ["code": code, "message": m]] }
+        let params = msg["params"] as? [String: Any] ?? [:]
+        switch method {
+        case "initialize":
+            let asked = params["protocolVersion"] as? String ?? ""
+            return reply(["protocolVersion": protocolVersions.contains(asked) ? asked : protocolVersions[0],
+                          "capabilities": ["tools": ["listChanged": false]],
+                          "serverInfo": ["name": mcpServerName, "title": productName, "version": appVersion],
+                          "instructions": "Read-only usage figures for the AI coding tools on this Mac. Call get_usage before starting a large task, or best_available to choose which tool has headroom."])
+        case "ping": return reply([:])
+        case "tools/list": return reply(["tools": tools])
+        case "tools/call":
+            let name = params["name"] as? String ?? ""
+            let args = params["arguments"] as? [String: Any] ?? [:]
+            var usage = usageObject(load)
+            var providers = usage["providers"] as? [[String: Any]] ?? []
+            switch name {
+            case "get_usage":
+                if let want = args["provider"] as? String, !want.isEmpty {
+                    providers = providers.filter { matches($0, want) }
+                    if providers.isEmpty { return reply(result(["error": "No provider called \(want). Known: claude, codex, gemini, grok, grok-bot, muse."], isError: true)) }
+                }
+                usage["providers"] = providers
+                return reply(result(usage))
+            case "best_available":
+                let among = (args["among"] as? [String]) ?? []
+                let ranked = providers
+                    .filter { ($0["status"] as? String) == "ok" || ($0["status"] as? String) == "stale" }
+                    .filter { p in among.isEmpty || among.contains { matches(p, $0) } }
+                    .sorted { ($0["remaining_percent"] as? Double ?? 0) > ($1["remaining_percent"] as? Double ?? 0) }
+                    .map { p -> [String: Any] in ["id": p["id"] ?? "", "name": p["name"] ?? "", "remaining_percent": p["remaining_percent"] ?? NSNull(),
+                                                  "resets_at": p["resets_at"] ?? NSNull(), "plan": p["plan"] ?? NSNull(), "status": p["status"] ?? ""] }
+                return reply(result(["ranked": ranked, "best": ranked.first ?? NSNull(), "generated_at": usage["generated_at"] ?? NSNull()]))
+            default:
+                return failure(-32602, "Unknown tool: \(name)")
+            }
+        default:
+            return failure(-32601, "Method not found: \(method)")
+        }
+    }
+
+    /// Newline-delimited JSON-RPC on stdin/stdout. Nothing but protocol messages may go to stdout.
+    static func serve() -> Never {
+        unsetenv("LLMUSAGE_DEBUG")
+        var cache: (at: Date, data: Data)? = nil
+        let load: () -> Data = {
+            if let c = cache, Date().timeIntervalSince(c.at) < 60 { return c.data }
+            let d = UsageExport.current(maxAge: 600)
+            cache = (Date(), d)
+            return d
+        }
+        while let line = readLine(strippingNewline: true) {
+            guard !line.trimmingCharacters(in: .whitespaces).isEmpty else { continue }
+            var out: [String: Any]?
+            if let obj = (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any] {
+                out = handle(obj, load: load)
+            } else {
+                out = ["jsonrpc": "2.0", "id": NSNull(), "error": ["code": -32700, "message": "Parse error"]]
+            }
+            if let o = out, var d = try? JSONSerialization.data(withJSONObject: o) {
+                d.append(0x0A)
+                FileHandle.standardOutput.write(d)
+            }
+        }
+        exit(0)
+    }
+
+    static var executable: String { Bundle.main.executablePath ?? "LLMUsage" }
+    /// The settings other apps need, for pasting into tools that have no command for it (Grok Bot, Cursor and others).
+    static var configJSON: String {
+        text(["mcpServers": [mcpServerName: ["command": executable, "args": ["--mcp"]]]])
+    }
+}
+
 /// Display order in the menu bar and the dropdown.
 let allProviders: [Provider] = [ClaudeProvider(), CodexProvider(), GeminiProvider(), GrokProvider(), GrokBotProvider(), MuseProvider()]
 
@@ -1568,7 +1806,7 @@ enum SelfTest {
          "credits":{"has_credits":false,"unlimited":false,"balance":"0"},
          "rate_limit_reset_credits":{"available_count":2},"spend_control":{"reached":false}}
         """), into: &x)
-        check(x.plan == "Pro 100 · someone@example.invalid", "codex plan: \(x.plan ?? "nil")")
+        check(x.plan == "Pro 100" && x.account == "someone@example.invalid" && x.displayPlan == "Pro 100 · someone@example.invalid", "codex plan: \(x.plan ?? "nil")")
         check(x.windows.count == 1 && x.windows[0].label == "Weekly limit" && x.headline == 11, "codex window \(x.windows.map(\.label))")
         check(x.windows[0].resetsAt == Date(timeIntervalSince1970: 1893456000), "codex reset")
         check(x.note == "2 limit resets available", "codex note: \(x.note ?? "nil")")
@@ -1608,6 +1846,35 @@ enum SelfTest {
         MuseProvider.parse(allowance: obj(#"{"weekly":{"remainingFraction":0.75}}"#), into: &mf)
         check(mf.windows.first?.usedPercent == 25, "muse fraction")
 
+        // Machine-readable export: no account, correct state and remaining figures.
+        var exp = x; exp.fetchedAt = Date(timeIntervalSince1970: 1893456000)
+        var miss = blank("Muse"); miss.missing = "not installed"
+        let ej = UsageExport.data([exp, miss, k])
+        let es = String(decoding: ej, as: UTF8.self)
+        check(!es.contains("example.invalid"), "export never contains the account email")
+        let eo = (try? JSONSerialization.jsonObject(with: ej)) as? [String: Any]
+        let eps = eo?["providers"] as? [[String: Any]] ?? []
+        check(eps.count == 3 && eps[0]["id"] as? String == "codex" && eps[0]["remaining_percent"] as? Double == 89 && eps[0]["status"] as? String == "ok", "export codex \(eps.first ?? [:])")
+        check(eps[1]["status"] as? String == "not_set_up" && eps[2]["status"] as? String == "ok", "export states")
+
+        check(UsageExport.snapshotURL.path.hasSuffix("/usage.json") && !bundleID.isEmpty, "snapshot path resolves")
+
+        // MCP: handshake, tool list, both tools, errors, notifications.
+        let load = { ej }
+        let ini = MCPServer.handle(["jsonrpc": "2.0", "id": 1, "method": "initialize", "params": ["protocolVersion": "2025-03-26"]], load: load)
+        check(((ini?["result"] as? [String: Any])?["protocolVersion"] as? String) == "2025-03-26", "mcp negotiates the client's version")
+        check(MCPServer.handle(["jsonrpc": "2.0", "method": "notifications/initialized"], load: load) == nil, "mcp notifications get no reply")
+        let tl = ((MCPServer.handle(["jsonrpc": "2.0", "id": 2, "method": "tools/list"], load: load)?["result"] as? [String: Any])?["tools"] as? [[String: Any]]) ?? []
+        check(tl.map { $0["name"] as? String ?? "" } == ["get_usage", "best_available"], "mcp tools")
+        let gu = (MCPServer.handle(["jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": ["name": "get_usage", "arguments": ["provider": "Codex"]]], load: load)?["result"] as? [String: Any])?["structuredContent"] as? [String: Any]
+        check((gu?["providers"] as? [[String: Any]])?.count == 1, "mcp get_usage filter")
+        let ba = (MCPServer.handle(["jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": ["name": "best_available", "arguments": [:]]], load: load)?["result"] as? [String: Any])?["structuredContent"] as? [String: Any]
+        check(((ba?["best"] as? [String: Any])?["id"] as? String) == "grok" && (ba?["ranked"] as? [Any])?.count == 2, "mcp best_available ranks grok (100% left) over codex, skips not-set-up \(ba ?? [:])")
+        let bad = MCPServer.handle(["jsonrpc": "2.0", "id": 5, "method": "resources/list"], load: load)
+        check(((bad?["error"] as? [String: Any])?["code"] as? Int) == -32601, "mcp unknown method")
+        let badTool = (MCPServer.handle(["jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": ["name": "get_usage", "arguments": ["provider": "nope"]]], load: load)?["result"] as? [String: Any])?["isError"] as? Bool
+        check(badTool == true, "mcp unknown provider is a tool error")
+
         // Helpers.
         check(windowLabel(seconds: 604800) == "Weekly" && windowLabel(seconds: 18000) == "5-hour", "window labels")
         check(base32Decode("nbswy3dp") == "hello", "base32")
@@ -1629,9 +1896,20 @@ extension ProcessInfo {
 
 if CommandLine.arguments.contains("--selftest") { exit(SelfTest.run()) }
 
+if CommandLine.arguments.contains("--mcp") { MCPServer.serve() }
+
+if CommandLine.arguments.contains("--json") {
+    // Same JSON the MCP server returns. --live skips the menu bar app's snapshot.
+    let d = CommandLine.arguments.contains("--live") ? UsageExport.data(fetchAll()) : UsageExport.current()
+    FileHandle.standardOutput.write(d); print("")
+    exit(0)
+}
+
+if CommandLine.arguments.contains("--mcp-config") { print(MCPServer.configJSON); exit(0) }
+
 if CommandLine.arguments.contains("--setup") {
     // Headless version of the Setup Check window.
-    print(AppDelegate.setupReport(allProviders.map { $0.fetch() }))
+    print(AppDelegate.setupReport(fetchAll()))
     exit(0)
 }
 
@@ -1640,7 +1918,7 @@ if CommandLine.arguments.contains("--print") {
     let only = Set(CommandLine.arguments.dropFirst().filter { !$0.hasPrefix("--") }.map { $0.uppercased() })
     for p in allProviders where only.isEmpty || only.contains(p.short.uppercased()) || only.contains(p.name.uppercased()) {
         let s = p.fetch()
-        print("[\(s.name)] plan=\(s.plan ?? "-") headline=\(s.headline.map { String(format: "%.0f%%", $0) } ?? "-")")
+        print("[\(s.name)] plan=\(s.displayPlan ?? "-") headline=\(s.headline.map { String(format: "%.0f%%", $0) } ?? "-")")
         for w in s.windows { print("   \(w.label): \(String(format: "%.0f", w.usedPercent))% \(w.resetsAt.map(UsageRowView.resetText) ?? "")") }
         if let m = s.missing { print("   not set up: \(m)") }
         if let e = s.error { print("   ERROR: \(e)") }
@@ -1656,8 +1934,6 @@ if CommandLine.arguments.contains("--print") {
 /// starts it at login and KeepAlive relaunches it after a crash (a clean Quit, exit 0, stays quit).
 /// An SMAppService agent was tried first, but launchd pins those to a code requirement that, for an ad-hoc
 /// signed app, is the binary's hash: every rebuild made launchd refuse to spawn it (exit 78, EX_CONFIG) in a loop.
-/// Set in Info.plist by build.sh (BUNDLE_ID); also the launchd label and the defaults domain.
-let bundleID = Bundle.main.bundleIdentifier ?? "llm-usage"
 
 enum LoginAgent {
     static let label = bundleID
@@ -1709,7 +1985,7 @@ enum LoginAgent {
     }
 }
 let launchedByAgent = ProcessInfo.processInfo.environment["XPC_SERVICE_NAME"] == LoginAgent.label
-let headlessRun = ["--print", "--setup", "--selftest", "--login", "--render-marks", "--render-icon", "--render-preview"].contains { CommandLine.arguments.contains($0) }
+let headlessRun = ["--print", "--setup", "--selftest", "--json", "--mcp", "--mcp-config", "--login", "--render-marks", "--render-icon", "--render-preview"].contains { CommandLine.arguments.contains($0) }
 
 // Must come after LoginAgent and its globals: top-level code runs in file order, and touching a global before its
 // line has run crashes (this handler once sat above them and segfaulted).

@@ -4,6 +4,10 @@
 
 First release intended for anyone to install.
 
+- AI agents can query usage: a built-in MCP server (`--mcp`) with `get_usage` and
+  `best_available`, a Connect AI Tools menu item, `--json` output, and a snapshot
+  file. Agents never see the account email or tokens. Verified with Grok's own MCP
+  diagnostics.
 - Disk image with drag-to-Applications, alongside the zip. Releases are built by
   GitHub Actions from the tagged commit, with a signed build provenance attestation
   and checksums.
