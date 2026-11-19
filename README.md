@@ -68,10 +68,10 @@ That compiles a universal app to `~/Applications/Leeway.app` and launches it.
 
 ## Using it
 
-The menu bar shows a small bar chart with one bar per tool, filled by how much is
-left and turning orange then red near a limit, followed by the tool with the most
-leeway, for example its logo and "80% left". An orange "!" means a tool needs
-attention. Turn off Settings › Compact Menu Bar to see every tool's figure instead.
+The menu bar shows a small bar chart with one bar per tool, in the same order and
+filled the same way as the dropdown's bars, turning orange then red near a limit.
+Next to it is the tool with the most leeway, for example its logo and "20% used",
+or "80% left" with Show Remaining on. An orange "!" means a tool needs attention. Turn off Settings › Compact Menu Bar to see every tool's figure instead.
 Click it for every provider, each limit
 window and when it resets. Click a provider's name to open its usage page; hover it
 to see which account is signed in. Tools still waiting on setup sit at the bottom. Figures

@@ -1110,10 +1110,11 @@ enum MenuBarTitle {
                 let track = NSRect(x: x, y: 0, width: w, height: h)
                 NSColor.labelColor.withAlphaComponent(0.22).setFill()
                 NSBezierPath(roundedRect: track, xRadius: 1, yRadius: 1).fill()
-                let left = max(0, min(100, 100 - u)) / 100
-                if left > 0 {
+                // Filled the same way as the dropdown's bars: by what's used, or by what's left with Show Remaining.
+                let fill = shownPercent(max(0, min(100, u))) / 100
+                if fill > 0 {
                     barColor(u).setFill()
-                    NSBezierPath(roundedRect: NSRect(x: x, y: 0, width: w, height: max(2, h * left)), xRadius: 1, yRadius: 1).fill()
+                    NSBezierPath(roundedRect: NSRect(x: x, y: 0, width: w, height: max(2, h * fill)), xRadius: 1, yRadius: 1).fill()
                 }
             }
             return true
@@ -1137,12 +1138,12 @@ enum MenuBarTitle {
             }
         }
         if compact {
-            // The tool with the most room, always as what's left: that's the figure you can act on.
+            // The tool with the most room, in the same terms as its row in the dropdown (used, or left with
+            // Show Remaining), so the two never disagree.
             if let best = withFigures.max(by: { ($0.headline ?? 100) > ($1.headline ?? 100) }), let u = best.headline {
-                let left = max(0, 100 - u)
                 mark(best)
-                title.append(NSAttributedString(string: String(format: "%.0f%%", left), attributes: [.font: font, .foregroundColor: barColor(u)]))
-                title.append(NSAttributedString(string: " left", attributes: [.font: small, .foregroundColor: NSColor.secondaryLabelColor]))
+                title.append(NSAttributedString(string: String(format: "%.0f%%", shownPercent(u)), attributes: [.font: font, .foregroundColor: barColor(u)]))
+                title.append(NSAttributedString(string: " " + percentWord, attributes: [.font: small, .foregroundColor: NSColor.labelColor.withAlphaComponent(0.7)]))
             }
         } else {
             for (i, s) in withFigures.enumerated() {
@@ -1988,10 +1989,11 @@ enum SelfTest {
         let badTool = (MCPServer.handle(["jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": ["name": "get_usage", "arguments": ["provider": "nope"]]], load: load)?["result"] as? [String: Any])?["isError"] as? Bool
         check(badTool == true, "mcp unknown provider is a tool error")
 
-        // Menu bar: compact mode names the tool with the most left, not the exhausted one.
+        // Menu bar: compact mode names the tool with the most room, not the exhausted one.
         func mb(_ n: String, _ u: Double) -> ProviderStatus { ProviderStatus(name: n, short: "?", windows: [UsageWindow(label: "w", usedPercent: u, resetsAt: nil)]) }
         let mbt = MenuBarTitle.make([mb("A", 100), mb("B", 20), mb("C", 67)], compact: true).text.string
-        check(mbt.contains("80%") && mbt.contains("left") && !mbt.contains("100"), "menu bar shows the most leeway: \(mbt)")
+        // Same terms as the dropdown, whichever way Show Remaining is set.
+        check(mbt.contains(String(format: "%.0f%% %@", shownPercent(20), percentWord)) && !mbt.contains("100"), "menu bar shows the most leeway: \(mbt)")
 
         // Helpers.
         check(windowLabel(seconds: 604800) == "Weekly" && windowLabel(seconds: 18000) == "5-hour", "window labels")

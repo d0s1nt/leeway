@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.1
+
+- The menu bar now agrees with the dropdown: its bars fill by what's used, and its
+  figure says "used", unless Show Remaining is on, in which case both count down
+  what's left. Before, the menu bar always showed what was left while the dropdown
+  showed what was used, so the two looked contradictory.
+- The "used" or "left" label in the menu bar is easier to read.
+
 ## 0.2.0
 
 First release intended for anyone to install, under a new name: **Leeway** (previously LLM Usage).
