@@ -284,6 +284,8 @@ let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? 
 /// Display order in the menu bar and the dropdown.
 let allProviders: [Provider] = [ClaudeProvider(), CodexProvider(), GeminiProvider(), GrokProvider(), GrokBotProvider(), MuseProvider()]
 let menuWidth: CGFloat = 380
+/// Window lengths, typed: older Swift compilers won't infer TimeInterval from integer literals in ternaries.
+let fiveHours: TimeInterval = 5 * 3600, oneDay: TimeInterval = 86400, oneWeek: TimeInterval = 7 * 86400
 let rowInset: CGFloat = 14
 /// Agents call `--mcp` and `--json` unattended, so a keychain prompt nobody answers must not hang them for minutes.
 let keychainTimeout: TimeInterval = CommandLine.arguments.contains("--mcp") || CommandLine.arguments.contains("--json") ? 15 : 300
@@ -850,7 +852,7 @@ extension ClaudeProvider {
                 }
                 let isShort = kind == "five_hour"
                 st.windows.append(UsageWindow(label: label, usedPercent: pct, resetsAt: iso(l["resets_at"] as? String),
-                                              kind: isShort ? .short : .allowance, windowSeconds: isShort ? 5 * 3600 : kind.hasPrefix("weekly") ? 7 * 86400 : nil))
+                                              kind: isShort ? .short : .allowance, windowSeconds: isShort ? fiveHours : kind.hasPrefix("weekly") ? oneWeek : nil))
             }
         } else {
             let order = ["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"]
@@ -858,7 +860,7 @@ extension ClaudeProvider {
             for k in order {
                 guard let w = o[k] as? [String: Any], let u = w["utilization"] as? Double else { continue }
                 st.windows.append(UsageWindow(label: labels[k] ?? k, usedPercent: u, resetsAt: iso(w["resets_at"] as? String),
-                                              kind: k == "five_hour" ? .short : .allowance, windowSeconds: k == "five_hour" ? 5 * 3600 : 7 * 86400))
+                                              kind: k == "five_hour" ? .short : .allowance, windowSeconds: k == "five_hour" ? fiveHours : oneWeek))
             }
         }
         if let bd = o["seven_day_breakdown"] as? [String: Any], let rows = bd["rows"] as? [[String: Any]] {
@@ -910,7 +912,7 @@ extension GeminiProvider {
         for b in (q["buckets"] as? [[String: Any]] ?? []) {
             guard let model = b["modelId"] as? String, let frac = b["remainingFraction"] as? Double else { continue }
             let label = model.replacingOccurrences(of: "gemini-", with: "")
-            st.windows.append(UsageWindow(label: label, usedPercent: min(100, max(0, (1 - frac) * 100)), resetsAt: iso(b["resetTime"] as? String), windowSeconds: 86400))
+            st.windows.append(UsageWindow(label: label, usedPercent: min(100, max(0, (1 - frac) * 100)), resetsAt: iso(b["resetTime"] as? String), windowSeconds: oneDay))
         }
         st.windows.sort { $0.label < $1.label }
         if st.windows.isEmpty { st.error = "The quota reply had no figures in it; its format may have changed. Try Check for Updates." }
@@ -928,7 +930,7 @@ extension GrokProvider {
         let periodType = (period?["type"] as? String ?? "").replacingOccurrences(of: "USAGE_PERIOD_TYPE_", with: "").capitalized
         // Proto-style JSON omits zero-valued fields, so a missing creditUsagePercent means 0%.
         let pct = (cfg["creditUsagePercent"] as? Double) ?? 0
-        let length: TimeInterval? = ["Weekly": 7 * 86400, "Daily": 86400][periodType]
+        let length: TimeInterval? = ["Weekly": oneWeek, "Daily": oneDay][periodType]
         // A reply with no config at all is a changed format, not 0% used.
         if !cfg.isEmpty {
             st.windows.append(UsageWindow(label: periodType.isEmpty ? "Usage limit" : "\(periodType) limit", usedPercent: min(100, max(0, pct)), resetsAt: periodEnd, windowSeconds: length))
@@ -949,7 +951,7 @@ extension GrokBotProvider {
         st.plan = plan
         let reset = (usage["nextResetMs"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) }
         if let pct = usage["percentUsed"] as? Double {
-            st.windows.append(UsageWindow(label: "Included usage", usedPercent: min(max(pct, 0), 100), resetsAt: reset, windowSeconds: 7 * 86400))
+            st.windows.append(UsageWindow(label: "Included usage", usedPercent: min(max(pct, 0), 100), resetsAt: reset, windowSeconds: oneWeek))
         }
         if let od = usage["onDemand"] as? [String: Any], let limit = od["limitCents"] as? Double, limit > 0 {
             let used = (od["usedCents"] as? Double) ?? 0
@@ -997,7 +999,7 @@ extension MuseProvider {
             if let p = pct {
                 let isShort = label == "5-hour window"
                 st.windows.append(UsageWindow(label: label, usedPercent: min(100, max(0, p)), resetsAt: reset, kind: isShort ? .short : .allowance,
-                                              windowSeconds: isShort ? 5 * 3600 : label == "Weekly" ? 7 * 86400 : nil))
+                                              windowSeconds: isShort ? fiveHours : label == "Weekly" ? oneWeek : nil))
             }
         }
         walk(allowance, prefix: "")
@@ -1890,7 +1892,7 @@ if let i = CommandLine.arguments.firstIndex(of: "--render-menubar"), i + 1 < Com
 if let i = CommandLine.arguments.firstIndex(of: "--render-preview"), i + 1 < CommandLine.arguments.count {
     // Renders the dropdown with invented demo figures to a PNG, for the README. No real data is read.
     let day: TimeInterval = 86400
-    func w(_ l: String, _ p: Double, _ d: Double?, kind: UsageWindow.Kind = .allowance, len: TimeInterval? = 7 * 86400, money: UsageWindow.Money? = nil) -> UsageWindow {
+    func w(_ l: String, _ p: Double, _ d: Double?, kind: UsageWindow.Kind = .allowance, len: TimeInterval? = oneWeek, money: UsageWindow.Money? = nil) -> UsageWindow {
         UsageWindow(label: l, usedPercent: p, resetsAt: d.map { Date().addingTimeInterval($0 * day + 600) }, kind: kind, windowSeconds: len, money: money)
     }
     let demo: [ProviderStatus] = [
@@ -1898,7 +1900,7 @@ if let i = CommandLine.arguments.firstIndex(of: "--render-preview"), i + 1 < Com
         ProviderStatus(name: "Codex", short: "X", plan: "Pro", windows: [w("Weekly limit", 31, 4.2)]),
         ProviderStatus(name: "Grok", short: "K", plan: "SuperGrok", windows: [w("Weekly limit", 12, 5.1)]),
         ProviderStatus(name: "Grok Bot", short: "B", plan: "Grok Bot Plan", windows: [w("Included usage", 27, 6.3), w("On-demand", 40, nil, kind: .spend, len: nil, money: .init(used: 32, cap: 80))]),
-        ProviderStatus(name: "Muse", short: "M", plan: "Muse Code Power Usage", windows: [w("Weekly", 64, 3.4), w("5-hour window", 92, 0.08, kind: .short, len: 5 * 3600)]),
+        ProviderStatus(name: "Muse", short: "M", plan: "Muse Code Power Usage", windows: [w("Weekly", 64, 3.4), w("5-hour window", 92, 0.08, kind: .short, len: fiveHours)]),
         ProviderStatus(name: "Gemini", short: "G", plan: "Workspace account", note: "Needs a Google Cloud project: add GOOGLE_CLOUD_PROJECT=<id> to ~/.gemini/.env. Click for setup docs."),
     ]
     // --live renders this Mac's real figures instead, for checking the layout; never commit that image.
@@ -2303,8 +2305,8 @@ enum SelfTest {
 
         // Pace: 75% used half way through the week runs out early; 25% doesn't.
         let half = Date().addingTimeInterval(3.5 * 86400)
-        let fast = UsageWindow(label: "w", usedPercent: 75, resetsAt: half, windowSeconds: 7 * 86400)
-        let slow = UsageWindow(label: "w", usedPercent: 25, resetsAt: half, windowSeconds: 7 * 86400)
+        let fast = UsageWindow(label: "w", usedPercent: 75, resetsAt: half, windowSeconds: oneWeek)
+        let slow = UsageWindow(label: "w", usedPercent: 25, resetsAt: half, windowSeconds: oneWeek)
         check(abs((fast.elapsed() ?? 0) - 0.5) < 0.01 && fast.projectedRunOut() != nil && fast.projectedRunOut()! < half && slow.projectedRunOut() == nil, "pace projection")
 
         check(String(decoding: formBody([("a", "x+y&z"), ("b", "1/2")]), as: UTF8.self) == "a=x%2By%26z&b=1%2F2", "form encoding")
