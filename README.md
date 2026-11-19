@@ -70,15 +70,28 @@ That compiles a universal app to `~/Applications/Leeway.app` and launches it.
 
 The menu bar shows a small bar chart with one bar per tool, in the same order and
 filled the same way as the dropdown's bars, turning orange then red near a limit.
-Next to it is the tool with the most leeway, for example its logo and "20% used",
-or "80% left" with Show Remaining on. An orange "!" means a tool needs attention. Turn off Settings › Compact Menu Bar to see every tool's figure instead.
-Click it for every provider, each limit
-window and when it resets. Click a provider's name to open its usage page; hover it
-to see which account is signed in. Tools still waiting on setup sit at the bottom. Figures
-refresh every 5 minutes and whenever you open the menu.
+Next to it is the tool to use next: one that can take work right now, with the most
+room, for example its logo and "20% used", or "80% left" with Show Remaining on. If
+every tool is full it says when the first one is back. An orange "!" means a tool
+needs attention. Turn off Settings › Compact Menu Bar to see every tool's figure.
 
-The headline number is always the weekly or included allowance. Short windows and
-spend caps appear as rows but don't drive it.
+Click it for every provider, each limit window and when it resets. Click a provider's
+name to open its usage page; hover it to see which account is signed in. Tools still
+waiting on setup sit at the bottom. Figures refresh every 5 minutes, when you open the
+menu, and when the Mac wakes.
+
+- **The headline** is always the weekly or included allowance. Short windows and
+  spend caps appear as rows but don't drive it.
+- **"full · back in 2h"** means the tool can't take work now: its allowance, or a
+  short window such as Claude's or Muse's 5 hours, is used up. Such a tool is never
+  suggested as the one to use next.
+- **"paying · $32 of $80"** means the included allowance is used up and requests
+  now spend on-demand money. On-demand rows show dollars on the right.
+- **The tick on each bar** marks how much of the window's time has passed. A bar
+  past its tick is being used faster than the week is going. Hover a row to see
+  whether, at this rate, it runs out before it resets.
+- **"stale"** means the last refresh failed and older figures are shown. Figures
+  whose reset time has passed since show as "reset" until the next refresh.
 
 | Menu item | What it does |
 |---|---|
@@ -86,6 +99,7 @@ spend caps appear as rows but don't drive it.
 | Settings › Launch at Login | Starts at login, and relaunches Leeway if it ever crashes |
 | Settings › Compact Menu Bar | On by default: the tool with the most left. Off: every tool's figure |
 | Settings › Show Remaining | Counts down what's left, like the vendors' own screens |
+| Settings › Limit Alerts | Off by default. Notifications when a tool passes 90%, fills up, comes back, or starts spending on-demand money |
 | Settings › Renew Expired Sign-ins | Off by default. See below |
 | Settings › Connect AI Tools… | Lets Grok Bot, Claude Code, Codex, Grok and other agents query usage (below) |
 | Settings › Setup Check… | Which tools were found on this Mac, and how to fix the rest |
@@ -98,13 +112,17 @@ Agents can ask how much allowance is left before starting big work, or which too
 has the most headroom. The app includes an [MCP](https://modelcontextprotocol.io)
 server with two read-only tools:
 
-- **`get_usage`**: every provider's used and remaining percentage, each window, and
-  when it resets. Optionally one provider.
-- **`best_available`**: the tools that are set up, ranked by remaining allowance.
+- **`get_usage`**: every provider's used and remaining percentage, each window and
+  when it resets, whether it can take work now (`usable_now`, `blocked_until`,
+  `paid_only`), on-demand dollars, how far through each window it is, when it would
+  run out at the current rate, and how old the figures are. Optionally one provider.
+- **`best_available`**: the tools that are set up, ranked for taking work now:
+  tools that aren't blocked first, free allowance before paid, then the most room.
 
 Agents never see your account email or any token. The server reuses the figures the
 menu bar app fetched in the last 10 minutes, so frequent questions don't hit vendor
-rate limits.
+rate limits. If it has to fetch them itself, it saves them for the next agent, and it
+never waits more than 15 seconds for a keychain prompt nobody is there to answer.
 
 **The easy way:** choose **Settings › Connect AI Tools…** in the dropdown. It adds the server to
 Claude Code, Codex and the Grok CLI using each tool's own command, and copies the
@@ -149,6 +167,8 @@ Each token goes only to the vendor that issued it. Agents connected through MCP 
 usage figures and plan names only. The only other network request
 is **Check for Updates…**, which asks GitHub's public API for the release list, and
 only when you choose it.
+
+Limit Alerts are local notifications, posted by the app on your Mac.
 
 It writes its own preferences, the usage snapshot described above, a small log at `~/Library/Logs/Leeway.log` (where
 the menu bar item is placed, only when that changes), and a launch agent in
