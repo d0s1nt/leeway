@@ -47,7 +47,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </dict></plist>
 PLIST
 if [ "$SIGN_ID" = "-" ]; then
-  codesign --force --sign - "$APP" >/dev/null 2>&1 || true
+  codesign --force --sign - "$APP"   # a failed signature must fail the build, not ship unsigned
 else
   codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$APP"
 fi

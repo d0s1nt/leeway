@@ -3,6 +3,7 @@
 // Build: ./build.sh   (single file, no Xcode project needed)
 
 import AppKit
+import Network
 import UserNotifications
 
 // MARK: - Model
@@ -23,6 +24,9 @@ struct UsageWindow {
     var windowSeconds: TimeInterval? = nil   // the window's length, when known; drives the pace marker
     var money: Money? = nil
     var assumedReset = false     // an old reading whose reset time has passed: shown as reset, not as its old figure
+    /// A limit on one model only (Claude's "Weekly Opus", each Gemini model's quota). When it fills, other models
+    /// still work, so it neither drives the headline nor blocks the tool while a tool-wide allowance exists.
+    var scoped = false
 
     var headline: Bool { kind == .allowance }
     var isFull: Bool { usedPercent >= 99.5 }
@@ -64,17 +68,28 @@ struct ProviderStatus {
     var note: String? = nil
     var fetchedAt: Date = Date()
     var staleSince: Date? = nil       // set when we're showing an older result because the latest refresh failed
+    var needsSetup = false            // signed in, but figures need a step only the user can take (Gemini on Workspace)
 
     /// Headline figure for the menu bar: the most-used window.
     var displayPlan: String? { [plan, account].compactMap { $0 }.joined(separator: " · ").nilIfEmpty }
-    var headline: Double? { windows.filter(\.headline).map(\.usedPercent).max() }
+    var headline: Double? { headlineWindows.map(\.usedPercent).max() }
+    /// The allowances that speak for the whole tool: the tool-wide ones, or the per-model ones when that's all
+    /// the vendor reports (Gemini).
+    var headlineWindows: [UsageWindow] {
+        let all = windows.filter(\.headline), wide = all.filter { !$0.scoped }
+        return wide.isEmpty ? all : wide
+    }
 
     var availability: Availability {
-        let fullAllowances = windows.filter { $0.kind == .allowance && $0.isFull }
+        // A full per-model limit only blocks when there's no tool-wide allowance and every model is full.
+        let allowances = headlineWindows
+        let fullAllowances = allowances.contains(where: \.scoped) ? (allowances.allSatisfy(\.isFull) ? allowances : []) : allowances.filter(\.isFull)
         if !fullAllowances.isEmpty {
             if windows.contains(where: { $0.kind == .spend && !$0.isFull }) { return .paidOnly }
-            // Every full allowance has to reset before the tool is back.
+            // Every full tool-wide allowance has to reset before the tool is back; with only per-model limits, the
+            // first model to reset brings it back.
             let dates = fullAllowances.map(\.resetsAt)
+            if fullAllowances.contains(where: \.scoped) { return .blocked(until: dates.compactMap { $0 }.min()) }
             return .blocked(until: dates.contains(where: { $0 == nil }) ? nil : dates.compactMap { $0 }.max())
         }
         let fullShort = windows.filter { $0.kind == .short && $0.isFull }
@@ -111,7 +126,7 @@ var allowTokenRefresh: Bool { UserDefaults.standard.bool(forKey: "refreshTokens"
 var showRemaining: Bool { UserDefaults.standard.bool(forKey: "showRemaining") }
 func shownPercent(_ used: Double) -> Double { showRemaining ? max(0, 100 - used) : used }
 var percentWord: String { showRemaining ? "left" : "used" }
-let refreshHint = "or turn on \u{201C}Renew Expired Sign-ins\u{201D} in this menu"
+let refreshHint = "or turn on \u{201C}Renew Expired Sign-ins\u{201D} under Settings"
 
 /// Finds a command-line tool wherever it was installed. A menu bar app started by launchd gets a bare PATH,
 /// so this also asks the user's login shell for theirs and checks the usual per-user install locations.
@@ -155,11 +170,20 @@ enum HTTPError: Error, CustomStringConvertible {
     case badJSON
     var description: String {
         switch self {
-        case .status(let c, let body): return "HTTP \(c): \(body.prefix(140))"
+        case .status(let c, let body): return "HTTP \(c): \(redacted(String(body.prefix(400))).prefix(140))"
         case .transport(let m): return m
         case .badJSON: return "unexpected response"
         }
     }
+}
+
+/// Vendor error bodies can echo an email or a token back; neither belongs in the menu or in what agents read.
+func redacted(_ s: String) -> String {
+    var t = s
+    for pattern in [#"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"#, #"[A-Za-z0-9_\-]{24,}(\.[A-Za-z0-9_\-]{8,}){0,2}"#] {
+        t = t.replacingOccurrences(of: pattern, with: "…", options: .regularExpression)
+    }
+    return t.replacingOccurrences(of: "\n", with: " ")
 }
 
 func http(_ urlString: String, method: String = "GET", headers: [String: String] = [:], body: Data? = nil) throws -> (Int, Data) {
@@ -209,11 +233,14 @@ func json(_ data: Data) throws -> [String: Any] {
     return o
 }
 
-let debugShowKeys: Set<String> = ["account_id", "chatgpt_account_id", "user_id", "used_percent", "limit_window_seconds", "reset_at", "reset_after_seconds", "allowed", "limit_reached", "balance", "has_credits", "unlimited", "available_count", "error", "error_description", "subscriptionType", "rateLimitTier", "plan_type", "subscription_tier", "subscription_tier_display", "tier", "requestKind", "modelName", "windowSizeSeconds", "remainingQueries", "totalQueries", "remainingTokens", "totalTokens", "waitTimeSeconds", "cost", "limit", "remaining", "resetAt", "resetsAt", "window", "name", "id", "auth_mode", "plan", "kind", "group", "severity", "is_active", "percent", "display_name", "key", "limit_index",
-    "allowance_percent_of_weekly", "used_percent_of_weekly", "id", "name", "tierId", "tierName", "reasonCode", "reasonMessage",
+let debugShowKeys: Set<String> = ["used_percent", "limit_window_seconds", "reset_at", "reset_after_seconds", "allowed", "limit_reached", "balance", "has_credits", "unlimited", "available_count", "error", "error_description", "subscriptionType", "rateLimitTier", "plan_type", "subscription_tier", "subscription_tier_display", "tier", "requestKind", "modelName", "windowSizeSeconds", "remainingQueries", "totalQueries", "remainingTokens", "totalTokens", "waitTimeSeconds", "cost", "limit", "remaining", "resetAt", "resetsAt", "window", "auth_mode", "plan", "kind", "group", "severity", "is_active", "percent", "display_name", "key", "limit_index",
+    "allowance_percent_of_weekly", "used_percent_of_weekly", "tierId", "tierName", "reasonCode", "reasonMessage",
     "userDefinedCloudaicompanionProject", "isDefault", "utilization", "resets_at", "as_of", "window_started_at", "scope", "description"]
 /// Prints key names and value types only (plus values for a whitelist of descriptive keys) — never values — so responses can be inspected safely.
+/// Identifiers (account and user ids, names, emails) are never on the whitelist. Goes to standard error, so
+/// `LEEWAY_DEBUG=1 Leeway --json` still prints valid JSON.
 func debugShape(_ o: [String: Any], indent: String = "  ") {
+    func print(_ s: String) { FileHandle.standardError.write(Data((s + "\n").utf8)) }
     for k in o.keys.sorted() {
         let v = o[k]
         if let d = v as? [String: Any] { print("\(indent)\(k): {"); debugShape(d, indent: indent + "  "); print("\(indent)}") }
@@ -238,17 +265,25 @@ func iso(_ s: String?) -> Date? {
 @discardableResult
 /// Runs a program and returns (exit status, combined output). A program still running after `timeout` seconds is
 /// terminated, then killed, and reported as exit status -2, so a hung tool can never wedge a refresh.
-func run(_ cmd: String, _ args: [String], timeout: TimeInterval = 30) -> (Int32, String) {
+func run(_ cmd: String, _ args: [String], timeout: TimeInterval = 30, input: Data? = nil) -> (Int32, String) {
     let p = Process()
     p.executableURL = URL(fileURLWithPath: cmd)
     p.arguments = args
-    p.standardInput = FileHandle.nullDevice
+    let inPipe = input.map { _ in Pipe() }
+    p.standardInput = inPipe ?? FileHandle.nullDevice
     let pipe = Pipe()
     p.standardOutput = pipe
     p.standardError = pipe
     let exited = DispatchSemaphore(value: 0)
     p.terminationHandler = { _ in exited.signal() }
     do { try p.run() } catch { return (-1, error.localizedDescription) }
+    if let inPipe = inPipe, let input = input {
+        // Written off the calling thread so a program that doesn't read its input can't block us past the timeout.
+        DispatchQueue.global(qos: .utility).async {
+            try? inPipe.fileHandleForWriting.write(contentsOf: input)
+            try? inPipe.fileHandleForWriting.close()
+        }
+    }
     var data = Data()
     let lock = NSLock()
     let reader = DispatchGroup()
@@ -294,8 +329,18 @@ let keychainTimeout: TimeInterval = CommandLine.arguments.contains("--mcp") || C
 /// replaces the file, and the replacement would otherwise get the default 0644.
 func writeKeepingPermissions(_ data: Data, to path: String) throws {
     let perms = ((try? FileManager.default.attributesOfItem(atPath: path))?[.posixPermissions] as? NSNumber)?.intValue ?? 0o600
-    try data.write(to: URL(fileURLWithPath: path), options: .atomic)
-    try FileManager.default.setAttributes([.posixPermissions: perms], ofItemAtPath: path)
+    // The new copy is created with the final permissions before any data goes in, then renamed over the old file,
+    // so there's never a moment (or a crash) where the credentials sit in a file others can read.
+    let tmp = path + ".leeway-\(getpid()).tmp"
+    unlink(tmp)
+    let fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL, mode_t(perms & 0o600))
+    guard fd >= 0 else { throw HTTPError.transport("couldn't write \((path as NSString).lastPathComponent)") }
+    let h = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+    do {
+        try h.write(contentsOf: data); try h.synchronize(); try h.close()
+        chmod(tmp, mode_t(perms))   // the original mode, which may be less strict than 0600
+        guard rename(tmp, path) == 0 else { throw HTTPError.transport("couldn't replace \((path as NSString).lastPathComponent)") }
+    } catch { unlink(tmp); throw error }
 }
 
 /// Standard output for `--mcp` and `--json`. The throwing API, because the legacy write raises an Objective-C
@@ -310,6 +355,12 @@ func formBody(_ fields: [(String, String)]) -> Data {
     return Data(fields.map { "\($0)=\($1.addingPercentEncoding(withAllowedCharacters: allowed) ?? $1)" }.joined(separator: "&").utf8)
 }
 extension String { var nilIfEmpty: String? { isEmpty ? nil : self } }
+
+/// One argument for `security -i`, which reads commands from standard input: double-quoted, with backslashes and
+/// quotes escaped. A command is one line; serialised JSON never contains a raw newline.
+func securityQuoted(_ s: String) -> String {
+    "\"" + s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
+}
 
 func jwtExpiry(_ token: String) -> Date? {
     let parts = token.split(separator: ".")
@@ -384,8 +435,10 @@ struct ClaudeProvider: Provider {
                 root["claudeAiOauth"] = oauth
                 let acct = keychainAccount() ?? NSUserName()
                 let newBlob = String(decoding: jsonData(root), as: UTF8.self)
-                let (saved, _) = run("/usr/bin/security", ["add-generic-password", "-U", "-a", acct, "-s", Self.service, "-w", newBlob], timeout: keychainTimeout)
-                if saved != 0 { st.note = "Renewed the sign-in but couldn't save it to the keychain; if Claude Code asks you to sign in, do so once." }
+                // Sent on standard input, not as an argument, so the new sign-in never shows in the process list.
+                let (saved, out) = run("/usr/bin/security", ["-i"], timeout: keychainTimeout,
+                                       input: Data(("add-generic-password -U -a \(securityQuoted(acct)) -s \(securityQuoted(Self.service)) -w \(securityQuoted(newBlob))\n").utf8))
+                if saved != 0 || !out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { st.note = "Renewed the sign-in but couldn't save it to the keychain; if Claude Code asks you to sign in, do so once." }
             } catch {
                 st.error = "Refresh failed: \(error)"
                 return st
@@ -470,7 +523,15 @@ struct GeminiProvider: Provider {
     let short = "G"
     /// The Gemini CLI is an "installed app" in Google's OAuth terms, so its client id and secret ship inside the CLI
     /// itself. They are read from the user's own install at runtime rather than copied into this source.
-    static let cliOAuthClient: (id: String, secret: String)? = {
+    /// Looked up again on each renewal until found, so installing the CLI after Leeway started still works.
+    private static var foundClient: (id: String, secret: String)?
+    private static let clientLock = NSLock()
+    static var cliOAuthClient: (id: String, secret: String)? {
+        clientLock.lock(); defer { clientLock.unlock() }
+        if foundClient == nil { foundClient = findCLIOAuthClient() }
+        return foundClient
+    }
+    static func findCLIOAuthClient() -> (id: String, secret: String)? {
         guard let bin = Tools.find("gemini") else { return nil }
         var dir = URL(fileURLWithPath: bin).resolvingSymlinksInPath().deletingLastPathComponent()
         for _ in 0..<4 where !FileManager.default.fileExists(atPath: dir.appendingPathComponent("package.json").path) { dir.deleteLastPathComponent() }
@@ -484,7 +545,7 @@ struct GeminiProvider: Provider {
         }
         guard let id = value("ID"), let secret = value("SECRET") else { return nil }
         return (id, secret)
-    }()
+    }
     let path = home(".gemini/oauth_creds.json")
     let endpoint = "https://cloudcode-pa.googleapis.com/v1internal"
 
@@ -535,7 +596,8 @@ struct GeminiProvider: Provider {
                 if let inel = (load["ineligibleTiers"] as? [[String: Any]])?.first, let code = inel["reasonCode"] as? String {
                     if code == "RESTRICTED_DASHER_USER" {
                         st.plan = "Workspace account"
-                        st.note = "Needs a Google Cloud project: add GOOGLE_CLOUD_PROJECT=<id> to ~/.gemini/.env. Click for setup docs."
+                        st.needsSetup = true
+                        st.note = "Needs a Google Cloud project: add GOOGLE_CLOUD_PROJECT=<id> to ~/.gemini/.env (Leeway reads it there, not from your shell profile). Click for setup docs."
                         st.link = URL(string: "https://github.com/google-gemini/gemini-cli/blob/main/docs/get-started/authentication.md")
                     } else {
                         st.note = "Not eligible (\(code)); quota unavailable"
@@ -555,17 +617,29 @@ struct GeminiProvider: Provider {
 }
 
 extension GeminiProvider {
+    /// One line of a .env file the way dotenv reads it: an optional `export`, spaces around `=`, quotes, and a
+    /// trailing `# comment` after an unquoted value.
+    static func envValue(_ line: String, keys: [String]) -> String? {
+        var t = line.trimmingCharacters(in: .whitespaces)
+        if t.hasPrefix("#") { return nil }
+        if t.hasPrefix("export ") { t = String(t.dropFirst(7)).trimmingCharacters(in: .whitespaces) }
+        guard let eq = t.firstIndex(of: "="), keys.contains(t[..<eq].trimmingCharacters(in: .whitespaces)) else { return nil }
+        var v = t[t.index(after: eq)...].trimmingCharacters(in: .whitespaces)
+        if let q = v.first, q == "\"" || q == "'", let end = v.dropFirst().firstIndex(of: q) {
+            v = String(v[v.index(after: v.startIndex)..<end])
+        } else if let hash = v.range(of: " #") ?? v.range(of: "\t#") {
+            v = v[..<hash.lowerBound].trimmingCharacters(in: .whitespaces)
+        }
+        return v.isEmpty ? nil : v
+    }
+
     /// Same precedence Gemini CLI uses: environment, then ~/.gemini/.env.
     func configuredProject() -> String? {
         let env = ProcessInfo.processInfo.environment
         if let p = env["GOOGLE_CLOUD_PROJECT"] ?? env["GCLOUD_PROJECT"], !p.isEmpty { return p }
         if let text = try? String(contentsOfFile: home(".gemini/.env"), encoding: .utf8) {
-            for line in text.split(separator: "\n") {
-                let t = line.trimmingCharacters(in: .whitespaces)
-                for key in ["GOOGLE_CLOUD_PROJECT=", "GCLOUD_PROJECT="] where t.hasPrefix(key) {
-                    let v = t.dropFirst(key.count).trimmingCharacters(in: CharacterSet(charactersIn: "\"' "))
-                    if !v.isEmpty { return v }
-                }
+            for line in text.split(whereSeparator: \.isNewline) {
+                if let v = Self.envValue(String(line), keys: ["GOOGLE_CLOUD_PROJECT", "GCLOUD_PROJECT"]) { return v }
             }
         }
         return nil
@@ -591,7 +665,8 @@ extension MuseProvider {
             let ns = text as NSString
             for m in re.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
                 if let d = iso(ns.substring(with: m.range(at: 1))) {
-                    if best == nil || mod > best!.1 { best = (d, mod) }
+                    // Newest journal first, then the latest reset in it: a long session can have hit the quota in an earlier window too.
+                    if best == nil || mod > best!.1 || (mod == best!.1 && d > best!.0) { best = (d, mod) }
                 }
             }
         }
@@ -599,7 +674,11 @@ extension MuseProvider {
     }
 }
 
-func agoShort(_ d: Date) -> String { relative(Date().addingTimeInterval(Date().timeIntervalSince(d))) }
+/// How long ago, in the same units as `relative`: "27m", "3h 5m". Never "0m": under a minute is "<1m".
+func agoShort(_ d: Date) -> String {
+    let secs = Date().timeIntervalSince(d)
+    return secs < 60 ? "<1m" : relative(Date().addingTimeInterval(secs))
+}
 
 // MARK: - Grok Build via the CLI's own agent (JSON-RPC over stdio)
 //
@@ -693,12 +772,24 @@ struct GrokProvider: Provider {
         defer { client.close() }
 
         let caps: [String: Any] = ["fs": ["readTextFile": false, "writeTextFile": false], "terminal": false]
-        guard client.call("initialize", ["protocolVersion": 1, "clientCapabilities": caps,
-                                         "_meta": ["clientType": "leeway-menubar", "clientVersion": "1.0"]]) != nil else {
+        guard let hello = client.call("initialize", ["protocolVersion": 1, "clientCapabilities": caps,
+                                                     "_meta": ["clientType": "leeway-menubar", "clientVersion": appVersion]]) else {
             st.error = "grok agent didn't answer initialize"; return st
         }
-        guard let auth = client.call("authenticate", ["methodId": "cached_token"]), auth["error"] == nil else {
-            st.error = "Grok session expired; run `grok login`"; return st
+        if let e = hello["error"] as? [String: Any] {
+            st.error = "The grok agent refused to start a session (\(redacted(e["message"] as? String ?? "no reason given"))); its protocol may have changed. Try Check for Updates."
+            return st
+        }
+        guard let auth = client.call("authenticate", ["methodId": "cached_token"]) else {
+            st.error = "grok agent didn't answer authenticate"; return st
+        }
+        if let e = auth["error"] as? [String: Any] {
+            // Only call it an expired sign-in when the agent says so; anything else is a change we don't understand.
+            let why = (e["message"] as? String ?? "").lowercased()
+            st.error = ["auth", "token", "login", "expired", "credential", "unauthor"].contains(where: why.contains)
+                ? "Grok's sign-in has expired; run `grok login`"
+                : "The grok agent wouldn't authenticate (\(redacted(e["message"] as? String ?? "no reason given"))). Try Check for Updates."
+            return st
         }
         let meta = (auth["result"] as? [String: Any])?["_meta"] as? [String: Any]
         st.plan = meta?["subscription_tier"] as? String
@@ -811,8 +902,9 @@ struct GrokBotProvider: Provider {
         } else if let e = expires, e < Date() {
             st.staleSince = readAt
             notes.append("Grok Bot's reading has expired; it updates on next use")
-        } else {
-            notes.append("as of \(agoShort(readAt)) ago")
+        } else if Date().timeIntervalSince(readAt) > 15 * 60 {
+            // Leeway can't refresh this itself; say whose check it was, so it doesn't read as a failed refresh.
+            notes.append("Grok Bot last checked \(agoShort(readAt)) ago; it updates while you use it")
         }
         st.note = notes.joined(separator: " · ")
         return st
@@ -852,7 +944,8 @@ extension ClaudeProvider {
                 }
                 let isShort = kind == "five_hour"
                 st.windows.append(UsageWindow(label: label, usedPercent: pct, resetsAt: iso(l["resets_at"] as? String),
-                                              kind: isShort ? .short : .allowance, windowSeconds: isShort ? fiveHours : kind.hasPrefix("weekly") ? oneWeek : nil))
+                                              kind: isShort ? .short : .allowance, windowSeconds: isShort ? fiveHours : kind.hasPrefix("weekly") ? oneWeek : nil,
+                                              scoped: kind == "weekly_scoped"))
             }
         } else {
             let order = ["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"]
@@ -860,7 +953,8 @@ extension ClaudeProvider {
             for k in order {
                 guard let w = o[k] as? [String: Any], let u = w["utilization"] as? Double else { continue }
                 st.windows.append(UsageWindow(label: labels[k] ?? k, usedPercent: u, resetsAt: iso(w["resets_at"] as? String),
-                                              kind: k == "five_hour" ? .short : .allowance, windowSeconds: k == "five_hour" ? fiveHours : oneWeek))
+                                              kind: k == "five_hour" ? .short : .allowance, windowSeconds: k == "five_hour" ? fiveHours : oneWeek,
+                                              scoped: k == "seven_day_opus" || k == "seven_day_sonnet"))
             }
         }
         if let bd = o["seven_day_breakdown"] as? [String: Any], let rows = bd["rows"] as? [[String: Any]] {
@@ -899,9 +993,11 @@ extension CodexProvider {
             else if cr["has_credits"] as? Bool == true, let bal = cr["balance"] as? String { notes.append("Credits: \(bal)") }
             if cr["overage_limit_reached"] as? Bool == true { notes.append("overage limit reached") }
         }
-        if let rc = o["rate_limit_reset_credits"] as? [String: Any], let n = rc["available_count"] as? Int, n > 0 { notes.append("\(n) limit reset\(n == 1 ? "" : "s") available") }
+        if let rc = o["rate_limit_reset_credits"] as? [String: Any], let n = rc["available_count"] as? Int, n > 0 { notes.append("\(n) early limit reset\(n == 1 ? "" : "s") left, to use from Codex's usage page") }
         if let sc = o["spend_control"] as? [String: Any], sc["reached"] as? Bool == true { notes.append("spend control reached") }
-        if st.windows.isEmpty { notes.append("No limit windows reported") }
+        if st.windows.isEmpty && !notes.contains("Unlimited credits") {
+            st.error = "The usage reply had no limits in it; its format may have changed. Try Check for Updates."
+        }
         if !notes.isEmpty { st.note = notes.joined(separator: " · ") }
     }
 }
@@ -912,7 +1008,7 @@ extension GeminiProvider {
         for b in (q["buckets"] as? [[String: Any]] ?? []) {
             guard let model = b["modelId"] as? String, let frac = b["remainingFraction"] as? Double else { continue }
             let label = model.replacingOccurrences(of: "gemini-", with: "")
-            st.windows.append(UsageWindow(label: label, usedPercent: min(100, max(0, (1 - frac) * 100)), resetsAt: iso(b["resetTime"] as? String), windowSeconds: oneDay))
+            st.windows.append(UsageWindow(label: label, usedPercent: min(100, max(0, (1 - frac) * 100)), resetsAt: iso(b["resetTime"] as? String), windowSeconds: oneDay, scoped: true))
         }
         st.windows.sort { $0.label < $1.label }
         if st.windows.isEmpty { st.error = "The quota reply had no figures in it; its format may have changed. Try Check for Updates." }
@@ -932,7 +1028,8 @@ extension GrokProvider {
         let pct = (cfg["creditUsagePercent"] as? Double) ?? 0
         let length: TimeInterval? = ["Weekly": oneWeek, "Daily": oneDay][periodType]
         // A reply with no config at all is a changed format, not 0% used.
-        if !cfg.isEmpty {
+        if cfg.isEmpty { st.error = "The billing reply had no figures in it; its format may have changed. Try Check for Updates." }
+        else {
             st.windows.append(UsageWindow(label: periodType.isEmpty ? "Usage limit" : "\(periodType) limit", usedPercent: min(100, max(0, pct)), resetsAt: periodEnd, windowSeconds: length))
         }
         let cap = val("onDemandCap")
@@ -1004,7 +1101,7 @@ extension MuseProvider {
         }
         walk(allowance, prefix: "")
         if let plan = (allowance["plan"] as? String) ?? (allowance["tier"] as? String) { st.plan = plan }
-        if st.windows.isEmpty { st.note = "Allowance present but no percentage fields recognised" }
+        if st.windows.isEmpty { st.error = "Muse's usage reply had no figures Leeway recognises; its format may have changed. Try Check for Updates." }
     }
 }
 
@@ -1059,8 +1156,9 @@ func relative(_ d: Date) -> String {
     return "\(days)d \((secs % 86400) / 3600)h"
 }
 
+/// "Thu 26 Nov, 11:09" here, "Thu, Nov 26, 11:09 AM" in the US: the Mac's own date and clock settings.
 func absolute(_ d: Date) -> String {
-    let f = DateFormatter(); f.dateFormat = "EEE d MMM, HH:mm"; return f.string(from: d)
+    let f = DateFormatter(); f.setLocalizedDateFormatFromTemplate("EEEdMMMjmm"); return f.string(from: d)
 }
 
 /// "$32" or "$7.40": whole dollars once there's no room for cents.
@@ -1083,7 +1181,10 @@ func verdict(_ s: ProviderStatus) -> (text: String, color: NSColor)? {
 class LinkRowView: NSView {
     var link: URL?
     var highlighted = false { didSet { needsDisplay = true } }
-    override func mouseDown(with event: NSEvent) {
+    override func mouseDown(with event: NSEvent) { open() }
+    /// VoiceOver's press, so a row that says it's a button or link actually does something.
+    override func accessibilityPerformPress() -> Bool { guard link != nil else { return false }; open(); return true }
+    func open() {
         guard let link = link else { return }
         enclosingMenuItem?.menu?.cancelTracking()
         NSWorkspace.shared.open(link)
@@ -1102,6 +1203,16 @@ class LinkRowView: NSView {
 
 final class HeaderRowView: LinkRowView {
     let status: ProviderStatus
+    /// The header's right-hand words, shared by drawing and VoiceOver so the two can't disagree.
+    static func state(_ s: ProviderStatus) -> (text: String, color: NSColor, figure: Bool) {
+        if s.windows.isEmpty && s.error == nil { return s.needsSetup ? ("setup needed", .systemOrange, false) : ("no figures yet", .secondaryLabelColor, false) }
+        if s.error != nil { return ("needs attention", .systemOrange, false) }
+        if let v = verdict(s) { return (v.text, v.color, false) }
+        if let since = s.staleSince { return ("stale · \(agoShort(since)) old", .systemOrange, false) }
+        if !s.headlineWindows.isEmpty && s.headlineWindows.allSatisfy(\.assumedReset) { return ("reset", .secondaryLabelColor, false) }
+        if let h = s.headline { return (String(format: "%.0f%% %@", shownPercent(h), percentWord), Brand.usage(h), true) }
+        return ("no data", .secondaryLabelColor, false)
+    }
     init(_ st: ProviderStatus) {
         status = st
         super.init(frame: NSRect(x: 0, y: 0, width: menuWidth, height: 28))
@@ -1109,8 +1220,7 @@ final class HeaderRowView: LinkRowView {
         toolTip = [st.link.map { "Open \($0.host ?? "usage page")" }, st.account.map { "Signed in as \($0)" }].compactMap { $0 }.joined(separator: "\n").nilIfEmpty
         setAccessibilityElement(true)
         setAccessibilityRole(st.link == nil ? .staticText : .button)
-        let figure = verdict(st)?.text ?? st.headline.map { String(format: "%.0f percent %@", shownPercent($0), percentWord) } ?? (st.error != nil ? "needs attention" : "no data")
-        setAccessibilityLabel([st.name, st.plan, figure].compactMap { $0 }.joined(separator: ", "))
+        setAccessibilityLabel([st.name, st.plan, Self.state(st).text.replacingOccurrences(of: "%", with: " percent")].compactMap { $0 }.joined(separator: ", "))
     }
     required init?(coder: NSCoder) { fatalError() }
     override func draw(_ dirtyRect: NSRect) {
@@ -1129,20 +1239,8 @@ final class HeaderRowView: LinkRowView {
         let x = rowInset + 21 + name.size().width + 7
         let small = NSFont.systemFont(ofSize: 11)
         func text(_ t: String, _ c: NSColor, _ f: NSFont = small) -> NSAttributedString { NSAttributedString(string: t, attributes: [.font: f, .foregroundColor: c]) }
-        let right: NSAttributedString
-        if status.windows.isEmpty && status.error == nil {
-            right = text("no figures yet", .tertiaryLabelColor)
-        } else if status.error != nil {
-            right = text("needs attention", .systemOrange)
-        } else if let v = verdict(status) {
-            right = text(v.text, v.color, NSFont.systemFont(ofSize: 11, weight: .medium))
-        } else if let since = status.staleSince {
-            right = text("stale · \(agoShort(since)) old".replacingOccurrences(of: "now old", with: "just now"), .systemOrange)
-        } else if let h = status.headline {
-            right = text(String(format: "%.0f%% %@", shownPercent(h), percentWord), Brand.usage(h), NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium))
-        } else {
-            right = text("no data", .tertiaryLabelColor)
-        }
+        let st = Self.state(status)
+        let right = text(st.text, st.color, st.figure ? NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium) : st.color == .secondaryLabelColor ? small : NSFont.systemFont(ofSize: 11, weight: .medium))
         let rightX = menuWidth - rowInset - right.size().width
         right.draw(at: NSPoint(x: rightX, y: 7))
         if let plan = status.plan {
@@ -1155,8 +1253,11 @@ final class HeaderRowView: LinkRowView {
 
 final class UsageRowView: NSView {
     let usage: UsageWindow
-    init(_ w: UsageWindow) {
+    /// An on-demand cap that isn't in play: the included allowance still has room, so it's drawn calmly.
+    let quiet: Bool
+    init(_ w: UsageWindow, quiet: Bool = false) {
         usage = w
+        self.quiet = quiet
         super.init(frame: NSRect(x: 0, y: 0, width: menuWidth, height: 24))
         var tip: [String] = []
         if let r = w.resetsAt { tip.append("Resets \(absolute(r))") }
@@ -1170,7 +1271,9 @@ final class UsageRowView: NSView {
         toolTip = tip.joined(separator: "\n").nilIfEmpty
         setAccessibilityElement(true)
         setAccessibilityRole(.staticText)
-        setAccessibilityLabel(String(format: "%@: %.0f percent %@", w.label, shownPercent(w.usedPercent), percentWord) + (w.resetsAt.map { ", resets \(absolute($0))" } ?? "") + (w.money.map { ", \(dollars($0.used)) of \(dollars($0.cap))" } ?? ""))
+        let figure = w.assumedReset ? "reset" : String(format: "%.0f percent %@", shownPercent(w.usedPercent), percentWord)
+        let pace = w.projectedRunOut().map { ", at this rate runs out \(absolute($0))" } ?? ""
+        setAccessibilityLabel("\(w.label): \(figure)" + (w.resetsAt.map { ", resets \(absolute($0))" } ?? "") + pace + (w.money.map { ", \(dollars($0.used)) of \(dollars($0.cap))" } ?? ""))
     }
     required init?(coder: NSCoder) { fatalError() }
 
@@ -1193,19 +1296,20 @@ final class UsageRowView: NSView {
         let shown = shownPercent(pct)
         var fill = barRect; fill.size.width = max(shown > 0 ? 6 : 0, barRect.width * CGFloat(shown / 100))
         if fill.width > 0 {
-            Brand.usage(pct).setFill()
+            (quiet ? NSColor.secondaryLabelColor.withAlphaComponent(0.5) : Brand.usage(pct)).setFill()
             NSBezierPath(roundedRect: fill, xRadius: 3, yRadius: 3).fill()
         }
         // Pace marker: how much of the window's time has gone (or, counting down, how much is left). A bar past
         // the marker is using the allowance faster than the week is passing.
         if let e = usage.elapsed(), usage.kind != .spend, e > 0.02, e < 0.98 {
             let at = barRect.minX + barRect.width * CGFloat(showRemaining ? 1 - e : e)
-            NSColor.labelColor.withAlphaComponent(0.55).setFill()
+            NSColor.labelColor.withAlphaComponent(0.7).setFill()
             NSBezierPath(roundedRect: NSRect(x: at - 0.75, y: barRect.minY - 2.5, width: 1.5, height: barRect.height + 5), xRadius: 0.75, yRadius: 0.75).fill()
         }
 
         var numAttrs = num
-        if pct >= 90 { numAttrs[.foregroundColor] = NSColor.systemRed } else if pct >= 75 { numAttrs[.foregroundColor] = NSColor.systemOrange }
+        if quiet { numAttrs[.foregroundColor] = NSColor.secondaryLabelColor }
+        else if pct >= 90 { numAttrs[.foregroundColor] = NSColor.systemRed } else if pct >= 75 { numAttrs[.foregroundColor] = NSColor.systemOrange }
         let pctStr = NSAttributedString(string: String(format: "%.0f%%", shown), attributes: numAttrs)
         pctStr.draw(at: NSPoint(x: rowInset + 276 - pctStr.size().width, y: 4))
 
@@ -1217,6 +1321,22 @@ final class UsageRowView: NSView {
             t.draw(at: NSPoint(x: menuWidth - rowInset - t.size().width, y: 5))
         }
     }
+}
+
+/// One provider's rows in the dropdown: header, a row per window, then any warning and note. Shared with the
+/// README preview renderer so the picture can't drift from the menu.
+func providerRows(_ s: ProviderStatus) -> [NSView] {
+    var rows: [NSView] = [HeaderRowView(s)]
+    let capInReserve = s.availability == .available
+    rows += s.windows.map { UsageRowView($0, quiet: $0.kind == .spend && capInReserve) as NSView }
+    if capInReserve, s.windows.contains(where: { $0.kind == .spend && $0.isFull }) {
+        let back = s.headlineWindows.compactMap(\.resetsAt).max().map { " until it resets in \(relative($0))" } ?? ""
+        rows.append(NoteRowView("On-demand cap is used up. Included usage still has room; once that runs out, \(s.name) stops\(back).", maxLines: 2))
+    }
+    let lines = s.windows.isEmpty ? 4 : 2   // a setup instruction is worth its full length
+    if let e = s.error { rows.append(NoteRowView(e, color: .systemOrange, link: s.link, maxLines: lines)) }
+    if let n = s.note { rows.append(NoteRowView(n, link: s.link, maxLines: lines)) }
+    return rows
 }
 
 final class NoteRowView: LinkRowView {
@@ -1308,13 +1428,19 @@ enum MenuBarTitle {
         if compact {
             // The tool to use next: one that can take work now, free before paid, then the most room. Shown in the
             // same terms as its row in the dropdown (used, or left with Show Remaining), so the two never disagree.
-            func rank(_ s: ProviderStatus) -> Int { switch s.availability { case .available: return 0; case .paidOnly: return 1; case .blocked: return 2 } }
+            // A tool whose sign-in has expired or that keeps failing can't be relied on, whatever its last figures say.
+            func rank(_ s: ProviderStatus) -> Int {
+                if s.error != nil { return 3 }
+                switch s.availability { case .available: return 0; case .paidOnly: return 1; case .blocked: return 2 }
+            }
             let ordered = withFigures.sorted { (rank($0), $0.headline ?? 100) < (rank($1), $1.headline ?? 100) }
             if let best = ordered.first, let u = best.headline {
                 mark(best)
-                if case .blocked(let until) = best.availability {
+                if best.error != nil {
+                    title.append(NSAttributedString(string: "needs attention", attributes: [.font: font, .foregroundColor: NSColor.systemOrange]))
+                } else if case .blocked(let until) = best.availability {
                     // Everything is full: say when the first tool comes back instead of a useless 100%.
-                    let soonest = withFigures.compactMap(\.blockedUntil).min() ?? until
+                    let soonest = withFigures.filter { $0.error == nil }.compactMap(\.blockedUntil).min() ?? until
                     title.append(NSAttributedString(string: soonest.map { "back in \(relative($0))" } ?? "all full", attributes: [.font: font, .foregroundColor: NSColor.systemRed]))
                 } else {
                     title.append(NSAttributedString(string: String(format: "%.0f%%", shownPercent(u)), attributes: [.font: font, .foregroundColor: barColor(u)]))
@@ -1341,7 +1467,7 @@ enum MenuBarTitle {
 
 // MARK: - App
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotificationCenterDelegate {
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     let menu = NSMenu()
     let providers: [Provider] = allProviders
@@ -1350,6 +1476,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var refreshing = false
     var timer: Timer?
     var backoffUntil: [String: Date] = [:]     // provider short -> don't refetch before this
+    let network = NWPathMonitor()
+    var online = true
 
     func applicationDidFinishLaunching(_ n: Notification) {
         item.autosaveName = statusAutosaveName
@@ -1358,6 +1486,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         item.button?.title = "…"
         menu.delegate = self
         item.menu = menu
+        UNUserNotificationCenter.current().delegate = self
         // Start from the last saved figures, so a restart never blanks the menu and a rate limit on the first
         // fetch keeps showing them (marked stale) instead of an error.
         statuses = UsageExport.load()
@@ -1365,6 +1494,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         rebuildMenu()
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in self?.refresh() }
+        timer?.tolerance = 60
+        // Offline, every tool would fail on its own row; say it once, and refresh as soon as the network is back
+        // (after waking on a train, say) rather than on the next five-minute tick.
+        network.pathUpdateHandler = { [weak self] path in
+            let up = path.status == .satisfied
+            DispatchQueue.main.async {
+                guard let self = self, up != self.online else { return }
+                self.online = up
+                self.rebuildMenu()
+                if up { DispatchQueue.main.asyncAfter(deadline: .now() + 3) { self.refresh() } }
+            }
+        }
+        network.start(queue: .global(qos: .utility))
         // After sleep the figures can be hours old; refresh once the network is back.
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             DispatchQueue.main.asyncAfter(deadline: .now() + 8) { self?.refresh() }
@@ -1377,7 +1519,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc func refresh() {
-        guard !refreshing else { return }
+        guard !refreshing, online else { return }
         refreshing = true
         let provs = providers
         let previous = statuses
@@ -1418,7 +1560,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func merge(_ fresh: ProviderStatus) -> ProviderStatus {
         guard let err = fresh.error else { return fresh }
         // Back off after a 429 whether or not there's anything to show meanwhile.
-        if err.contains("HTTP 429") { backoffUntil[fresh.short] = Date().addingTimeInterval(15 * 60) }
+        // Only a real fetch starts a backoff: while backing off, refresh reuses the last status, and re-arming on
+        // that reused 429 would keep a tool that never showed figures from being asked again until a restart.
+        if err.contains("HTTP 429"), (backoffUntil[fresh.short] ?? .distantPast) < Date() { backoffUntil[fresh.short] = Date().addingTimeInterval(15 * 60) }
         guard let old = statuses.first(where: { $0.short == fresh.short }), !old.windows.isEmpty else { return fresh }
         var kept = old.rolledOver()
         kept.staleSince = old.staleSince ?? old.fetchedAt
@@ -1445,11 +1589,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         item.button?.image = t.image
         item.button?.imagePosition = .imageLeading
         item.button?.attributedTitle = t.text
-        item.button?.setAccessibilityLabel("Leeway: " + (statuses.filter { $0.missing == nil && $0.headline != nil }
-            .map { String(format: "%@ %.0f percent %@", $0.name, shownPercent($0.headline!), percentWord) }.joined(separator: ", ")))
-        item.button?.toolTip = statuses.filter { $0.missing == nil }.map { s in
-            s.headline.map { String(format: "%@: %.0f%% %@", s.name, shownPercent($0), percentWord) } ?? "\(s.name): no data"
-        }.joined(separator: "\n")
+        // Spoken and hover text say what each header says: full, paying, stale, needs attention, or the figure.
+        let each = statuses.filter { $0.missing == nil }.map { "\($0.name): \(HeaderRowView.state($0).text)" }
+        item.button?.setAccessibilityLabel("Leeway. " + each.joined(separator: ", ").replacingOccurrences(of: "%", with: " percent"))
+        item.button?.toolTip = each.joined(separator: "\n")
 
         logPlacement()
     }
@@ -1509,17 +1652,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Providers with figures first, then the ones still waiting on something, kept to a line or two each.
         let shown = statuses.filter { $0.missing == nil }
         for s in shown.filter({ !$0.windows.isEmpty }) + shown.filter({ $0.windows.isEmpty }) {
-            let header = NSMenuItem(); header.view = HeaderRowView(s); menu.addItem(header)
-            for w in s.windows { let mi = NSMenuItem(); mi.view = UsageRowView(w); menu.addItem(mi) }
-            let lines = s.windows.isEmpty ? 4 : 2   // a setup instruction is worth its full length
-            if let e = s.error { let mi = NSMenuItem(); mi.view = NoteRowView(e, color: .systemOrange, link: s.link, maxLines: lines); menu.addItem(mi) }
-            if let n = s.note { let mi = NSMenuItem(); mi.view = NoteRowView(n, link: s.link, maxLines: lines); menu.addItem(mi) }
+            for v in providerRows(s) { let mi = NSMenuItem(); mi.view = v; menu.addItem(mi) }
             menu.addItem(.separator())
         }
 
         let r = NSMenuItem(title: "Refresh Now", action: #selector(refresh), keyEquivalent: "r")
         r.target = self
-        let when = refreshing ? "refreshing…" : (lastUpdate.map { "updated \(agoText($0))" } ?? "")
+        if !online {
+            let mi = NSMenuItem(); mi.view = NoteRowView("Offline. Showing figures from \(lastUpdate.map(agoText) ?? "the last check"); Leeway refreshes when the network is back.", color: .systemOrange); menu.addItem(mi)
+        }
+        let when = refreshing ? "refreshing…" : (lastUpdate.map { "checked \(agoText($0))" } ?? "")
         let rt = NSMutableAttributedString(string: "Refresh Now", attributes: [.font: NSFont.menuFont(ofSize: 0)])
         if !when.isEmpty { rt.append(NSAttributedString(string: "   " + when, attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor])) }
         r.attributedTitle = rt
@@ -1562,19 +1704,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         UserDefaults.standard.set(on, forKey: "limitAlerts")
         rebuildMenu()
         guard on else { return }
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, _ in
-            guard !granted else { return }
+        UNUserNotificationCenter.current().getNotificationSettings { s in
+            let status = s.authorizationStatus, banners = s.alertSetting
             DispatchQueue.main.async {
-                let a = NSAlert()
-                a.messageText = "Notifications are off for Leeway"
-                a.informativeText = "To get limit alerts, allow notifications for Leeway in System Settings › Notifications."
-                a.addButton(withTitle: "Open System Settings"); a.addButton(withTitle: "Not Now")
-                NSApp.activate(ignoringOtherApps: true)
-                if a.runModal() == .alertFirstButtonReturn, let u = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension") {
-                    NSWorkspace.shared.open(u)
+                switch status {
+                case .notDetermined: self.askForAlerts()
+                case .denied: self.alertsBlockedNotice()
+                default: banners == .disabled ? self.alertsBlockedNotice(bannersOnly: true) : self.confirmAlerts()
                 }
             }
         }
+    }
+
+    /// macOS asks a menu bar app as a notification banner in the top-right corner, not a dialog, and with a Focus
+    /// on it lands silently in Notification Center. If there's no answer after a few seconds, say where to look.
+    func askForAlerts() {
+        let hint = DispatchWorkItem {
+            let a = NSAlert()
+            a.messageText = "Allow notifications for Leeway"
+            a.informativeText = "macOS has put the request in the top-right corner of the screen. If it isn't there, click the clock to open Notification Center, find the Leeway request and choose Options › Allow. A Focus mode can hide it."
+            a.addButton(withTitle: "OK")
+            NSApp.activate(ignoringOtherApps: true)
+            a.runModal()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: hint)
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, _ in
+            DispatchQueue.main.async {
+                hint.cancel()
+                granted ? self.confirmAlerts() : self.alertsBlockedNotice()
+            }
+        }
+    }
+
+    /// One notification straight away, so turning alerts on proves they arrive.
+    func confirmAlerts() {
+        let c = UNMutableNotificationContent()
+        c.title = "Limit alerts are on"
+        c.body = "Leeway will tell you when a tool passes 90%, fills up, comes back, or starts spending on-demand money."
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "leeway.enabled", content: c, trigger: nil))
+    }
+
+    func alertsBlockedNotice(bannersOnly: Bool = false) {
+        let a = NSAlert()
+        a.messageText = bannersOnly ? "Leeway's notifications are hidden" : "Notifications are off for Leeway"
+        a.informativeText = bannersOnly
+            ? "Leeway is allowed to notify you, but its alerts are set to not appear. Choose Banners or Alerts for Leeway in System Settings › Notifications."
+            : "To get limit alerts, allow notifications for Leeway in System Settings › Notifications."
+        a.addButton(withTitle: "Open System Settings"); a.addButton(withTitle: "Not Now")
+        NSApp.activate(ignoringOtherApps: true)
+        if a.runModal() == .alertFirstButtonReturn, let u = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension") {
+            NSWorkspace.shared.open(u)
+        }
+    }
+
+    /// Without this, macOS drops a notification when Leeway counts as the frontmost app (just after a menu click).
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+                                withCompletionHandler done: @escaping (UNNotificationPresentationOptions) -> Void) {
+        done([.banner, .sound, .list])
     }
 
     /// Compares one refresh with the last and says what changed in ways worth interrupting for. Each threshold
@@ -1585,7 +1771,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for s in current where s.missing == nil && s.staleSince == nil && !s.windows.isEmpty {
             guard let p = previous.first(where: { $0.short == s.short }), !p.windows.isEmpty else { continue }
             if let h = s.headline, let ph = p.headline, ph < 90, h >= 90, h < 99.5 {
-                let reset = s.windows.filter(\.headline).compactMap(\.resetsAt).max()
+                let reset = s.headlineWindows.compactMap(\.resetsAt).max()
                 let key = "alerted.\(s.short).90"
                 let period = reset.map { String(Int($0.timeIntervalSince1970 / 3600)) } ?? "none"
                 if UserDefaults.standard.string(forKey: key) != period {
@@ -1615,7 +1801,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let secs = Int(Date().timeIntervalSince(d))
         if secs < 60 { return "just now" }
         if secs < 3600 { return "\(secs / 60) min ago" }
-        let f = DateFormatter(); f.dateFormat = Calendar.current.isDateInToday(d) ? "HH:mm" : "EEE HH:mm"
+        let f = DateFormatter(); f.setLocalizedDateFormatFromTemplate(Calendar.current.isDateInToday(d) ? "jmm" : "EEEjmm")
         return "at " + f.string(from: d)
     }
 
@@ -1636,8 +1822,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for s in statuses {
             if let m = s.missing { lines.append("○  \(s.name): not set up. \(m)") }
             else if let e = s.error { lines.append("⚠︎  \(s.name): found, but \(e)") }
-            else if s.windows.isEmpty { lines.append("●  \(s.name): found\(s.displayPlan.map { " (\($0))" } ?? ""), no usage figures yet. \(s.note ?? "")") }
-            else { lines.append("✓  \(s.name): working\(s.displayPlan.map { " (\($0))" } ?? "")") }
+            // The plan only, never the signed-in email: people paste this report into bug reports.
+            else if s.windows.isEmpty { lines.append("●  \(s.name): found\(s.plan.map { " (\($0))" } ?? ""), no usage figures yet. \(s.note ?? "")") }
+            else { lines.append("✓  \(s.name): working\(s.plan.map { " (\($0))" } ?? "")") }
         }
         let found = statuses.filter { $0.missing == nil }.count
         lines.append("")
@@ -1722,7 +1909,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             do {
                 let (c, d) = try http("https://api.github.com/repos/\(projectRepo)/releases?per_page=10", headers: ["Accept": "application/vnd.github+json", "User-Agent": "Leeway/\(appVersion)"])
                 guard c == 200, let list = try JSONSerialization.jsonObject(with: d) as? [[String: Any]] else { throw HTTPError.status(c, "GitHub didn't return a release list") }
-                let releases = list.filter { $0["draft"] as? Bool != true }.compactMap { r -> (String, URL)? in
+                // Finished releases only: a test build is never offered as an update.
+                let releases = list.filter { $0["draft"] as? Bool != true && $0["prerelease"] as? Bool != true }.compactMap { r -> (String, URL)? in
                     guard let tag = r["tag_name"] as? String, let u = (r["html_url"] as? String).flatMap(URL.init(string:)) else { return nil }
                     return (tag.hasPrefix("v") ? String(tag.dropFirst()) : tag, u)
                 }
@@ -1787,7 +1975,8 @@ if let i = CommandLine.arguments.firstIndex(of: "--render-marks"), i + 1 < Comma
     exit(0)
 }
 
-/// Numeric dotted-version comparison: "0.10.0" is newer than "0.9.2"; any pre-release suffix is ignored.
+/// Numeric dotted-version comparison: "0.10.0" is newer than "0.9.2", and a final release is newer than its own
+/// test builds ("1.0.0" is newer than "1.0.0-rc1").
 func isNewer(_ a: String, than b: String) -> Bool {
     func parts(_ v: String) -> [Int] { v.split(separator: "-").first.map { $0.split(separator: ".").map { Int($0) ?? 0 } } ?? [] }
     let x = parts(a), y = parts(b)
@@ -1795,7 +1984,7 @@ func isNewer(_ a: String, than b: String) -> Bool {
         let l = i < x.count ? x[i] : 0, r = i < y.count ? y[i] : 0
         if l != r { return l > r }
     }
-    return false
+    return !a.contains("-") && b.contains("-")
 }
 
 /// The app icon, drawn in code (no SF Symbols: Apple's licence doesn't allow them in app icons).
@@ -1901,7 +2090,7 @@ if let i = CommandLine.arguments.firstIndex(of: "--render-preview"), i + 1 < Com
         ProviderStatus(name: "Grok", short: "K", plan: "SuperGrok", windows: [w("Weekly limit", 12, 5.1)]),
         ProviderStatus(name: "Grok Bot", short: "B", plan: "Grok Bot Plan", windows: [w("Included usage", 27, 6.3), w("On-demand", 40, nil, kind: .spend, len: nil, money: .init(used: 32, cap: 80))]),
         ProviderStatus(name: "Muse", short: "M", plan: "Muse Code Power Usage", windows: [w("Weekly", 64, 3.4), w("5-hour window", 92, 0.08, kind: .short, len: fiveHours)]),
-        ProviderStatus(name: "Gemini", short: "G", plan: "Workspace account", note: "Needs a Google Cloud project: add GOOGLE_CLOUD_PROJECT=<id> to ~/.gemini/.env. Click for setup docs."),
+        ProviderStatus(name: "Gemini", short: "G", plan: "Workspace account", note: "Needs a Google Cloud project: add GOOGLE_CLOUD_PROJECT=<id> to ~/.gemini/.env (Leeway reads it there, not from your shell profile). Click for setup docs.", needsSetup: true),
     ]
     // --live renders this Mac's real figures instead, for checking the layout; never commit that image.
     let source = CommandLine.arguments.contains("--live") ? fetchAll().filter { $0.missing == nil } : demo
@@ -1910,16 +2099,12 @@ if let i = CommandLine.arguments.firstIndex(of: "--render-preview"), i + 1 < Com
     let appearance = NSAppearance(named: dark ? .darkAqua : .aqua)!
     var rows: [NSView] = []
     for st in ordered {
-        rows.append(HeaderRowView(st))
-        rows += st.windows.map { UsageRowView($0) as NSView }
-        let lines = st.windows.isEmpty ? 4 : 2
-        if let e = st.error { rows.append(NoteRowView(e, color: .systemOrange, maxLines: lines)) }
-        if let n = st.note { rows.append(NoteRowView(n, maxLines: lines)) }
+        rows += providerRows(st)
         let sep = NSBox(frame: NSRect(x: 0, y: 0, width: menuWidth, height: 9)); sep.boxType = .custom; sep.borderWidth = 0; sep.fillColor = .clear
         let line = NSBox(frame: NSRect(x: rowInset, y: 4, width: menuWidth - rowInset * 2, height: 1)); line.boxType = .custom; line.borderWidth = 0; line.fillColor = .separatorColor
         sep.addSubview(line); rows.append(sep)
     }
-    rows.removeLast()
+    if !rows.isEmpty { rows.removeLast() }   // the trailing separator; none when nothing is set up
     let pad: CGFloat = 8
     let height = rows.reduce(0) { $0 + $1.frame.height } + pad * 2
     let root = NSView(frame: NSRect(x: 0, y: 0, width: menuWidth, height: height))
@@ -1969,11 +2154,13 @@ enum UsageExport {
     static func object(_ statuses: [ProviderStatus], generated: Date = Date()) -> [String: Any] {
         let providers: [[String: Any]] = statuses.map { s in
             let state = s.missing != nil ? "not_set_up" : s.error != nil ? "error" : s.staleSince != nil ? "stale" : s.windows.isEmpty ? "no_data" : "ok"
-            let main = s.windows.filter(\.headline).max { $0.usedPercent < $1.usedPercent }
+            let main = s.headlineWindows.max { $0.usedPercent < $1.usedPercent }
             let asOf = s.staleSince ?? s.fetchedAt
             let set = s.missing == nil && !s.windows.isEmpty
             return [
-                "usable_now": set ? s.usableNow : false,
+                "error_kind": s.missing == nil ? (s.error.map(errorKind) ?? NSNull()) : NSNull(),
+                "needs_setup": s.missing == nil && s.needsSetup,
+                "usable_now": set && s.error == nil ? s.usableNow : false,
                 "paid_only": set && s.availability == .paidOnly,
                 "blocked_until": isoString(s.blockedUntil),
                 "data_age_seconds": Int(max(0, generated.timeIntervalSince(asOf))),
@@ -1984,10 +2171,10 @@ enum UsageExport {
                 "windows": s.windows.map { w -> [String: Any] in
                     var o: [String: Any] = [
                         "label": w.label, "kind": w.kind.rawValue, "used_percent": round1(w.usedPercent), "remaining_percent": round1(max(0, 100 - w.usedPercent)),
-                        "resets_at": isoString(w.resetsAt), "counts_toward_headline": w.headline,
+                        "resets_at": isoString(w.resetsAt), "counts_toward_headline": s.headlineWindows.contains { $0.label == w.label }, "per_model": w.scoped,
                         "window_seconds": w.windowSeconds.map { Int($0) } as Any? ?? NSNull(),
                         "elapsed_percent": w.elapsed(at: generated).map { round1($0 * 100) } as Any? ?? NSNull(),
-                        "projected_run_out_at": isoString(w.projectedRunOut(at: generated))]
+                        "projected_run_out_at": isoString(w.projectedRunOut(at: generated)), "assumed_reset": w.assumedReset]
                     if let m = w.money { o["spend_usd"] = m.used; o["cap_usd"] = m.cap }
                     return o
                 },
@@ -1995,7 +2182,19 @@ enum UsageExport {
                 "data_as_of": isoString(s.staleSince ?? s.fetchedAt),
             ]
         }
-        return ["app": productName, "version": appVersion, "generated_at": isoString(generated), "providers": providers]
+        return ["schema_version": schemaVersion, "app": productName, "version": appVersion, "generated_at": isoString(generated), "providers": providers]
+    }
+    /// Bumped only when a field agents read is removed or changes meaning; new fields don't change it.
+    static let schemaVersion = 1
+    /// A fixed vocabulary for agents, so they never have to parse the human-readable message.
+    static func errorKind(_ err: String) -> String {
+        let e = err.lowercased()
+        if e.contains("http 429") { return "rate_limited" }
+        if e.contains("keychain") { return "keychain" }
+        if AppDelegate.needsUser(err) { return "needs_sign_in" }
+        if e.contains("format may have changed") || e.contains("protocol may have changed") || e.contains("check for updates") { return "format_changed" }
+        if ["offline", "network", "timed out", "could not be found", "not connected", "connection"].contains(where: e.contains) { return "offline" }
+        return "other"
     }
     static func data(_ statuses: [ProviderStatus], pretty: Bool = true) -> Data {
         (try? JSONSerialization.data(withJSONObject: object(statuses), options: pretty ? [.prettyPrinted, .sortedKeys] : [.sortedKeys])) ?? Data("{}".utf8)
@@ -2004,20 +2203,30 @@ enum UsageExport {
     static func load(from url: URL = snapshotURL) -> [ProviderStatus] {
         guard let d = try? Data(contentsOf: url), let o = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],
               let ps = o["providers"] as? [[String: Any]] else { return [] }
+        let savedAt = iso(o["generated_at"] as? String) ?? .distantPast
         return ps.compactMap { p in
             guard let name = p["name"] as? String, let prov = allProviders.first(where: { $0.name == name }),
                   let asOf = iso(p["data_as_of"] as? String), Date().timeIntervalSince(asOf) < 7 * 86400 else { return nil }
             var st = ProviderStatus(name: name, short: prov.short)
             st.plan = p["plan"] as? String
             st.fetchedAt = asOf
-            if Date().timeIntervalSince(asOf) > 15 * 60 { st.staleSince = asOf }
-            st.note = (p["status"] as? String) == "ok" ? nil : p["message"] as? String
-            if (p["status"] as? String) == "not_set_up" { st.missing = p["message"] as? String }
+            let status = p["status"] as? String, message = p["message"] as? String
+            // Stale if it was when saved, or if the save itself is old (a restart after a while). A recent save
+            // keeps its own verdict: Grok Bot's reading is the app's own and can be old without being stale.
+            if status == "stale" || (Date().timeIntervalSince(savedAt) > 15 * 60 && Date().timeIntervalSince(asOf) > 15 * 60) { st.staleSince = asOf }
+            // An error stays an error across a restart, so its warning and the menu bar's "!" don't vanish.
+            switch status {
+            case "not_set_up": st.missing = message
+            case "error": st.error = message
+            default: st.note = message
+            }
+            st.needsSetup = p["needs_setup"] as? Bool ?? false
             st.windows = (p["windows"] as? [[String: Any]] ?? []).compactMap { w in
                 guard let l = w["label"] as? String, let u = w["used_percent"] as? Double else { return nil }
                 let kind = (w["kind"] as? String).flatMap(UsageWindow.Kind.init(rawValue:)) ?? ((w["counts_toward_headline"] as? Bool ?? true) ? .allowance : .short)
                 let money = (w["spend_usd"] as? Double).flatMap { u in (w["cap_usd"] as? Double).map { UsageWindow.Money(used: u, cap: $0) } }
-                return UsageWindow(label: l, usedPercent: u, resetsAt: iso(w["resets_at"] as? String), kind: kind, windowSeconds: w["window_seconds"] as? Double, money: money)
+                return UsageWindow(label: l, usedPercent: u, resetsAt: iso(w["resets_at"] as? String), kind: kind, windowSeconds: w["window_seconds"] as? Double, money: money,
+                                   assumedReset: w["assumed_reset"] as? Bool ?? false, scoped: w["per_model"] as? Bool ?? false)
             }
             return st.rolledOver()
         }
@@ -2033,9 +2242,12 @@ enum UsageExport {
     /// The snapshot if the menu bar app wrote it within `maxAge` seconds, else a live fetch. Agents may ask often;
     /// reusing the app's figures keeps them from hammering vendor endpoints (Anthropic rate-limits quickly).
     static func current(maxAge: TimeInterval = 600) -> Data {
+        // Re-read and re-serialised rather than passed through, so ages, pace and rollover are as of now.
         if let attrs = try? FileManager.default.attributesOfItem(atPath: snapshotURL.path),
-           let m = attrs[.modificationDate] as? Date, Date().timeIntervalSince(m) < maxAge,
-           let d = try? Data(contentsOf: snapshotURL) { return d }
+           let m = attrs[.modificationDate] as? Date, Date().timeIntervalSince(m) < maxAge {
+            let saved = load()
+            if !saved.isEmpty { return data(saved) }
+        }
         let live = fetchAll()
         writeSnapshot(live)
         return data(live)
@@ -2131,7 +2343,7 @@ enum MCPServer {
         unsetenv("LEEWAY_DEBUG")
         var cache: (at: Date, data: Data)? = nil
         let load: () -> Data = {
-            if let c = cache, Date().timeIntervalSince(c.at) < 60 { return c.data }
+            if let c = cache, Date().timeIntervalSince(c.at) < 15 { return c.data }
             let d = UsageExport.current(maxAge: 600)
             cache = (Date(), d)
             return d
@@ -2205,7 +2417,7 @@ enum SelfTest {
         check(x.plan == "Pro 100" && x.account == "someone@example.invalid" && x.displayPlan == "Pro 100 · someone@example.invalid", "codex plan: \(x.plan ?? "nil")")
         check(x.windows.count == 1 && x.windows[0].label == "Weekly limit" && x.headline == 11, "codex window \(x.windows.map(\.label))")
         check(x.windows[0].resetsAt == Date(timeIntervalSince1970: 1893456000), "codex reset")
-        check(x.note == "2 limit resets available", "codex note: \(x.note ?? "nil")")
+        check(x.note == "2 early limit resets left, to use from Codex's usage page", "codex note: \(x.note ?? "nil")")
         var xu = blank("Codex")
         CodexProvider.parse(obj(#"{"plan_type":"enterprise_v2","rate_limit":{"limit_reached":true,"primary_window":{"used_percent":100,"limit_window_seconds":18000}}}"#), into: &xu)
         check(xu.plan == "Enterprise_V2" && xu.windows.first?.label == "5-hour limit" && (xu.note ?? "").hasPrefix("Limit reached"), "codex unknown plan: \(xu.plan ?? "nil") \(xu.note ?? "nil")")
@@ -2337,6 +2549,65 @@ enum SelfTest {
         check(iso("2030-01-02T03:04:05.123Z") != nil && iso("not a date") == nil, "iso dates")
         check(ProviderStatus(name: "n", short: "n", windows: [UsageWindow(label: "a", usedPercent: 99, resetsAt: nil, kind: .spend)]).headline == nil, "non-headline windows never drive the number")
 
+        // 1.0: a full per-model limit doesn't block the tool; per-model-only tools block when every model is full.
+        var cs = blank("Claude")
+        ClaudeProvider.parse(obj(#"{"limits":[{"kind":"weekly_all","percent":5},{"kind":"weekly_scoped","percent":100,"resets_at":"2030-01-02T03:04:05Z","scope":{"model":{"display_name":"Fable"}}}]}"#), into: &cs)
+        check(cs.headline == 5 && cs.availability == .available && cs.windows.last?.scoped == true, "a full Fable limit leaves Claude usable")
+        var gs = blank("Gemini")
+        GeminiProvider.parse(quota: obj(#"{"buckets":[{"modelId":"gemini-pro","remainingFraction":0,"resetTime":"2030-01-02T00:00:00Z"},{"modelId":"gemini-flash","remainingFraction":0.5}]}"#), into: &gs)
+        check(gs.headline == 100 && gs.availability == .available, "one full Gemini model leaves Gemini usable")
+        var ga = blank("Gemini")
+        GeminiProvider.parse(quota: obj(#"{"buckets":[{"modelId":"gemini-pro","remainingFraction":0,"resetTime":"2030-01-02T00:00:00Z"},{"modelId":"gemini-flash","remainingFraction":0,"resetTime":"2030-01-01T00:00:00Z"}]}"#), into: &ga)
+        check(ga.blockedUntil == iso("2030-01-01T00:00:00Z"), "every Gemini model full: back when the first resets")
+
+        // An expired sign-in is never the pick, and agents are told it isn't usable.
+        var expired = mb("Expired", 5); expired.error = "Claude Code's sign-in has expired. Run `claude` once"
+        let pick = MenuBarTitle.make([expired, mb("B", 60)], compact: true).text.string
+        check(pick.contains(String(format: "%.0f%%", shownPercent(60))), "menu bar skips a tool whose sign-in expired: \(pick)")
+        let xo = (UsageExport.object([expired])["providers"] as? [[String: Any]])?.first ?? [:]
+        check(xo["usable_now"] as? Bool == false && xo["error_kind"] as? String == "needs_sign_in", "export: expired sign-in isn't usable \(xo)")
+        check(UsageExport.errorKind("HTTP 429: slow down") == "rate_limited" && UsageExport.errorKind("The Internet connection appears to be offline.") == "offline", "error kinds")
+
+        // Empty replies are errors for every provider, so the last good figures stay.
+        var xe = blank("Codex"); CodexProvider.parse(obj(#"{"plan_type":"pro"}"#), into: &xe)
+        var ke = blank("Grok"); GrokProvider.parse(billing: obj(#"{"subscription_tier":"x"}"#), into: &ke)
+        var me = blank("Muse"); MuseProvider.parse(allowance: obj(#"{"tier":"x"}"#), into: &me)
+        check(xe.error != nil && ke.error != nil && me.error != nil, "empty Codex, Grok and Muse replies are errors")
+
+        // Gemini's .env, the way dotenv reads it.
+        let keys = ["GOOGLE_CLOUD_PROJECT"]
+        check(GeminiProvider.envValue("GOOGLE_CLOUD_PROJECT=my-proj", keys: keys) == "my-proj"
+              && GeminiProvider.envValue("export GOOGLE_CLOUD_PROJECT = \"my-proj\"", keys: keys) == "my-proj"
+              && GeminiProvider.envValue("GOOGLE_CLOUD_PROJECT=my-proj # work", keys: keys) == "my-proj"
+              && GeminiProvider.envValue("# GOOGLE_CLOUD_PROJECT=old", keys: keys) == nil
+              && GeminiProvider.envValue("GOOGLE_CLOUD_PROJECT_NUMBER=1", keys: keys) == nil, ".env parsing")
+
+        // Privacy helpers.
+        let r = redacted("bad token for someone@example.invalid: abcdefghijklmnopqrstuvwxyz0123456789")
+        check(!r.contains("example.invalid") && !r.contains("abcdefghijklmnopqrstuvwxyz"), "vendor text redacted: \(r)")
+        check(securityQuoted(#"a"b\c"#) == #""a\"b\\c""#, "keychain argument quoting")
+        let ptmp = NSTemporaryDirectory() + "leeway-selftest-perm-\(getpid())"
+        FileManager.default.createFile(atPath: ptmp, contents: Data("old".utf8), attributes: [.posixPermissions: 0o600])
+        try? writeKeepingPermissions(Data("new".utf8), to: ptmp)
+        let pm = ((try? FileManager.default.attributesOfItem(atPath: ptmp))?[.posixPermissions] as? NSNumber)?.intValue
+        check(pm == 0o600 && FileManager.default.contents(atPath: ptmp) == Data("new".utf8), "credential rewrite keeps 0600")
+        try? FileManager.default.removeItem(atPath: ptmp)
+
+        // Restart keeps errors, reset states and per-model limits; agents see the schema version.
+        var er = cs; er.error = "Claude Code's sign-in has expired."; er.fetchedAt = Date()
+        er.windows[0].assumedReset = true
+        let rtmp = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("leeway-selftest-r-\(getpid()).json")
+        try? UsageExport.data([er]).write(to: rtmp)
+        let rback = UsageExport.load(from: rtmp).first
+        try? FileManager.default.removeItem(at: rtmp)
+        check(rback?.error != nil && rback?.windows.first?.assumedReset == true && rback?.windows.last?.scoped == true, "snapshot keeps errors, resets and per-model limits")
+        check(UsageExport.object([])["schema_version"] as? Int == 1, "schema version")
+
+        var setup = blank("Gemini"); setup.needsSetup = true; setup.note = "add a project"
+        check(HeaderRowView.state(setup).text == "setup needed" && HeaderRowView.state(blank("Muse")).text == "no figures yet", "setup needed vs no figures yet")
+        check(agoShort(Date()) == "<1m", "never \"0m ago\"")
+        check(isNewer("1.0.0", than: "1.0.0-rc1") && !isNewer("1.0.0-rc1", than: "1.0.0") && !isNewer("1.0.0-rc2", than: "1.0.0"), "a final release beats its test builds")
+
         print("selftest: \(passes) passed, \(failures) failed (\(ProcessInfo.processInfo.machineHardwareName))")
         return failures == 0 ? 0 : 1
     }
@@ -2373,7 +2644,7 @@ if CommandLine.arguments.contains("--print") {
     let only = Set(CommandLine.arguments.dropFirst().filter { !$0.hasPrefix("--") }.map { $0.uppercased() })
     for p in allProviders where only.isEmpty || only.contains(p.short.uppercased()) || only.contains(p.name.uppercased()) {
         let s = p.fetch()
-        print("[\(s.name)] plan=\(s.displayPlan ?? "-") headline=\(s.headline.map { String(format: "%.0f%%", $0) } ?? "-")")
+        print("[\(s.name)] plan=\(s.plan ?? "-") headline=\(s.headline.map { String(format: "%.0f%%", $0) } ?? "-")")
         for w in s.windows { print("   \(w.label): \(String(format: "%.0f", w.usedPercent))% \(w.resetsAt.map(UsageRowView.resetText) ?? "")") }
         if let m = s.missing { print("   not set up: \(m)") }
         if let e = s.error { print("   ERROR: \(e)") }

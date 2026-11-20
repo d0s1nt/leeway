@@ -37,12 +37,14 @@ Needs macOS 13 or later, on Apple Silicon or Intel.
 
 1. Download the `.dmg` from the [latest release](https://github.com/d0s1nt/leeway/releases/latest).
 2. Open it and drag **Leeway** to **Applications**.
-3. In Applications, **right-click Leeway and choose Open**, then Open again.
-   This is needed once, because releases aren't yet notarized by Apple.
-4. Optional: in the dropdown, choose **Settings › Launch at Login**.
-
-If macOS says the app "can't be opened", go to System Settings, Privacy & Security,
-and click **Open Anyway** next to Leeway.
+3. Open Leeway from Applications. macOS will say it can't check the app, because
+   releases aren't yet notarized by Apple. Click **Done**, then go to
+   **System Settings › Privacy & Security**, scroll down and click **Open Anyway**
+   next to Leeway. This is needed once.
+4. macOS asks whether **security** may use "Claude Code-credentials" from your
+   keychain. That's Leeway reading Claude Code's sign-in, so choose **Always Allow**
+   (or Allow, to be asked again next time).
+5. Optional: in the dropdown, choose **Settings › Launch at Login**.
 
 <details>
 <summary>Verify a download</summary>
@@ -50,7 +52,7 @@ and click **Open Anyway** next to Leeway.
 Releases are built by GitHub Actions from the tagged commit, with a signed build
 provenance attestation. With the GitHub CLI:
 
-    gh attestation verify Leeway-0.2.0.dmg --repo d0s1nt/leeway
+    gh attestation verify Leeway-1.0.0.dmg --repo d0s1nt/leeway
 
 `SHA256SUMS.txt` on each release lists the checksums.
 </details>
@@ -78,7 +80,8 @@ needs attention. Turn off Settings › Compact Menu Bar to see every tool's figu
 Click it for every provider, each limit window and when it resets. Click a provider's
 name to open its usage page; hover it to see which account is signed in. Tools still
 waiting on setup sit at the bottom. Figures refresh every 5 minutes, when you open the
-menu, and when the Mac wakes.
+menu, when the Mac wakes and when the network comes back. Times and dates follow
+your Mac's settings.
 
 - **The headline** is always the weekly or included allowance. Short windows and
   spend caps appear as rows but don't drive it.
@@ -86,12 +89,23 @@ menu, and when the Mac wakes.
   short window such as Claude's or Muse's 5 hours, is used up. Such a tool is never
   suggested as the one to use next.
 - **"paying · $32 of $80"** means the included allowance is used up and requests
-  now spend on-demand money. On-demand rows show dollars on the right.
+  now spend on-demand money. On-demand rows show dollars on the right. While the
+  included allowance still has room, an on-demand row is drawn in grey, even when
+  its cap is used up; a note then says the tool stops when the allowance runs out.
+- **Limits on one model** (Claude's weekly Opus or Fable limit, each Gemini model)
+  show as rows. A full one doesn't make the whole tool full, since other models
+  still work.
+- **"setup needed"** means the tool is signed in but you have a step to take; the
+  row underneath says what. **"no figures yet"** means there's nothing to do but use
+  the tool once.
 - **The tick on each bar** marks how much of the window's time has passed. A bar
   past its tick is being used faster than the week is going. Hover a row to see
   whether, at this rate, it runs out before it resets.
 - **"stale"** means the last refresh failed and older figures are shown. Figures
   whose reset time has passed since show as "reset" until the next refresh.
+- **Grok Bot's figures** are the ones the Grok Bot app saved on its last check;
+  Leeway can't ask for new ones. When they're over 15 minutes old the row says when
+  Grok Bot last checked.
 
 | Menu item | What it does |
 |---|---|
@@ -116,10 +130,15 @@ server with two read-only tools:
   when it resets, whether it can take work now (`usable_now`, `blocked_until`,
   `paid_only`), on-demand dollars, how far through each window it is, when it would
   run out at the current rate, and how old the figures are. Optionally one provider.
+  Failures carry an `error_kind`: `needs_sign_in`, `rate_limited`, `format_changed`,
+  `offline`, `keychain` or `other`, so agents never have to read the message.
 - **`best_available`**: the tools that are set up, ranked for taking work now:
   tools that aren't blocked first, free allowance before paid, then the most room.
 
-Agents never see your account email or any token. The server reuses the figures the
+The reply carries `schema_version` (now 1). It only changes if a field is removed
+or changes meaning; new fields can be added without it. Agents never see your
+account email or any token, and vendor error text is shown with anything that looks
+like an email or token removed. The server reuses the figures the
 menu bar app fetched in the last 10 minutes, so frequent questions don't hit vendor
 rate limits. If it has to fetch them itself, it saves them for the next agent, and it
 never waits more than 15 seconds for a keychain prompt nobody is there to answer.
@@ -168,7 +187,11 @@ usage figures and plan names only. The only other network request
 is **Check for Updates…**, which asks GitHub's public API for the release list, and
 only when you choose it.
 
-Limit Alerts are local notifications, posted by the app on your Mac.
+Limit Alerts are local notifications, posted by the app on your Mac. When you turn
+them on, macOS asks once whether Leeway may send notifications. For a menu bar app
+that request appears as a notification in the top-right corner, not a dialog, and a
+Focus mode can hold it in Notification Center. Once allowed, Leeway sends a "Limit
+alerts are on" notification so you know they arrive.
 
 It writes its own preferences, the usage snapshot described above, a small log at `~/Library/Logs/Leeway.log` (where
 the menu bar item is placed, only when that changes), and a launch agent in
@@ -209,11 +232,12 @@ with their age. After an HTTP 429 that provider is left alone for 15 minutes.
 there. macOS runs apps opened straight from Downloads or a disk image from a
 temporary location that a login item can't point to.
 
-**Gemini shows no data on a Workspace account.** Add `GOOGLE_CLOUD_PROJECT=<id>` to
-`~/.gemini/.env`.
+**Gemini says "setup needed" on a Workspace account.** Add
+`GOOGLE_CLOUD_PROJECT=<id>` to `~/.gemini/.env`. Leeway reads it from that file, not
+from your shell profile, since apps started from the menu bar don't see it.
 
-**Muse shows "currently unavailable".** Meta only reports usage after a prompt has
-run in the current window. Send one message in Muse.
+**Muse says "no figures yet".** Meta only reports usage after a prompt has run in
+the current window. Send one message in Muse.
 
 **From a terminal**, using the app's own binary:
 
@@ -225,8 +249,9 @@ run in the current window. Send one message in Muse.
     "$BIN" --json           # machine-readable usage, as agents see it
     "$BIN" --login status   # or on, off
 
-When reporting a problem, include the `--setup` output, but remove your email
-address from it first.
+When reporting a problem, include the `--setup` output. It shows plans, never your
+account email. `LEEWAY_DEBUG=1` before any of these prints the shape of each vendor
+reply to standard error (field names and types, no account details).
 
 ## Uninstall
 

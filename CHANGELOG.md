@@ -1,5 +1,46 @@
 # Changelog
 
+## 1.0.0
+
+The first stable release. As with 0.3.0, Claude Code, Muse Code and Grok Build each
+reviewed the app independently; every bug below was confirmed in the code first.
+
+- A full limit on one model (Claude's weekly Opus or Fable limit, one Gemini model)
+  no longer marks the whole tool as full, since other models still work.
+- A tool whose sign-in has expired, or that keeps failing, is never the menu bar's
+  pick, and agents are told it isn't usable now.
+- An on-demand cap that's used up while the included allowance still has room is
+  drawn in grey, with a note that the tool stops once the allowance runs out.
+- "setup needed" when a signed-in tool needs a step from you (Gemini on a Workspace
+  account), as distinct from "no figures yet".
+- Grok Bot's row says when the Grok Bot app last checked, and only once that's over
+  15 minutes ago, so it no longer reads like a failed refresh.
+- Offline, one line says so instead of an error on every row, and Leeway refreshes as
+  soon as the network is back.
+- Turning on Limit Alerts says where macOS put its permission request and confirms
+  with a notification once alerts are allowed.
+- VoiceOver can open the links on provider and setup rows, and hears the same state
+  the screen shows (full, paying, stale, setup needed, reset) plus the pace.
+- Times and dates follow the Mac's language and 12- or 24-hour clock settings.
+- For agents: `schema_version`, `error_kind`, `needs_setup`, `per_model` and
+  `assumed_reset`, and ages that are worked out when asked rather than when saved.
+- Fixed: a tool rate-limited before it ever showed figures was never asked again
+  until Leeway restarted.
+- Fixed: an unexpected empty reply from Codex, Grok or Muse wiped the last good
+  figures (0.3.0 fixed this for Claude and Gemini only).
+- Fixed: Muse could show an old "quota exhausted" reset time.
+- Fixed: `~/.gemini/.env` lines with `export`, spaces around `=` or a trailing
+  comment were ignored, and a Gemini CLI installed after Leeway started was never used
+  to renew Gemini's sign-in.
+- Fixed: Grok's agent refusing to start was reported as an expired sign-in.
+- Fixed: errors and "reset" states were forgotten across a restart.
+- Fixed: Check for Updates could offer a test build as the latest release.
+- Privacy: the Setup Check report and `--print` no longer include the account email;
+  debug output no longer shows account ids and goes to standard error; vendor error
+  text has anything like an email or token removed; renewed Codex and Gemini
+  credential files are never readable by other users, even briefly; a renewed Claude
+  sign-in is passed to the keychain without appearing in the process list.
+
 ## 0.3.0
 
 Ideas and bug reports for this release came from asking Claude Code, Muse Code and
