@@ -15,11 +15,13 @@ jobs:
         runner: [macos-15, macos-15-intel]
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0   # check-secrets.sh scans the whole history
       - name: Build universal app, disk image and zip (also runs the self-test and the secret scan)
         run: ./release.sh
+      - name: Homebrew cask style
+        run: brew style Casks/leeway.rb
       - name: Self-test on this architecture
         run: |
           uname -m
@@ -31,6 +33,7 @@ jobs:
           BIN="dist/Leeway.app/Contents/MacOS/Leeway"
           "$BIN" --login status
           "$BIN" --print
+          "$BIN" --history
           "$BIN" --render-preview "$RUNNER_TEMP/preview.png"
           "$BIN" --render-icon "$RUNNER_TEMP/icon.iconset"
       - name: JSON output and an MCP session
@@ -43,12 +46,14 @@ jobs:
             '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
             '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_usage","arguments":{}}}' \
             '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"best_available","arguments":{}}}' \
+            '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"get_usage_history","arguments":{}}}' \
             | "$BIN" --mcp > "$RUNNER_TEMP/mcp.out"
           python3 - "$RUNNER_TEMP/mcp.out" <<'EOF'
           import json, sys
           msgs = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
-          assert [m["id"] for m in msgs] == [1, 2, 3, 4], msgs
+          assert [m["id"] for m in msgs] == [1, 2, 3, 4, 5], msgs
           assert all("error" not in m for m in msgs), msgs
           assert len(msgs[2]["result"]["structuredContent"]["providers"]) == 6
+          assert msgs[4]["result"]["structuredContent"]["windows"] == [], msgs[4]   # a fresh machine has no history
           print("MCP session OK")
           EOF

@@ -10,7 +10,7 @@ jobs:
   release:
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: Tag matches VERSION
@@ -18,7 +18,7 @@ jobs:
       - name: Build, self-test and scan
         run: ./release.sh
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
             dist/Leeway-*.dmg
@@ -32,3 +32,15 @@ jobs:
           cat docs/release-footer.md >> notes.md
           gh release create "$GITHUB_REF_NAME" dist/Leeway-$V.dmg dist/Leeway-$V.zip dist/SHA256SUMS.txt \
             --title "Leeway $V" --notes-file notes.md
+      - name: Point the Homebrew cask at this release
+        run: |
+          V="$(cat VERSION)"
+          SUM="$(shasum -a 256 "dist/Leeway-$V.dmg" | cut -d' ' -f1)"
+          git fetch origin main
+          git checkout -B main origin/main
+          sed -i '' -E "s/^  version \".*\"/  version \"$V\"/; s/^  sha256 \"[0-9a-f]{64}\"/  sha256 \"$SUM\"/" Casks/leeway.rb
+          grep -q "version \"$V\"" Casks/leeway.rb && grep -q "sha256 \"$SUM\"" Casks/leeway.rb
+          if git diff --quiet -- Casks/leeway.rb; then echo "Cask already at $V"; exit 0; fi
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -m "Homebrew cask: Leeway $V" -- Casks/leeway.rb
+          git push origin main

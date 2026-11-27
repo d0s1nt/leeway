@@ -46,6 +46,17 @@ Needs macOS 13 or later, on Apple Silicon or Intel.
    (or Allow, to be asked again next time).
 5. Optional: in the dropdown, choose **Settings › Launch at Login**.
 
+**With Homebrew** instead of steps 1 and 2:
+
+    brew tap d0s1nt/leeway https://github.com/d0s1nt/leeway
+    brew trust d0s1nt/leeway
+    brew install --cask d0s1nt/leeway/leeway
+
+`brew upgrade` then keeps it current. Homebrew asks you to trust the tap because it
+isn't one of Homebrew's own. It doesn't get around step 3: macOS still asks for
+**Open Anyway** on first launch, and may again after an upgrade, until releases are
+notarized. Upgrading quits Leeway; open it again from Applications.
+
 <details>
 <summary>Verify a download</summary>
 
@@ -109,6 +120,11 @@ your Mac's settings.
 - **Grok Bot's figures** are the ones the Grok Bot app saved on its last check;
   Leeway can't ask for new ones. When they're over 15 minutes old the row says when
   Grok Bot last checked, and while Grok Bot is closed, clicking the row opens it.
+- **Past weeks** sit under each weekly allowance once Leeway has seen a week
+  through: a small bar for how high it got each week (up to six), this week so far
+  as an outline, and what it usually reaches. Daily and monthly allowances get the
+  same, by day or month. Hover it for the dates. The record stays on your Mac
+  (below) and builds up while Leeway runs; turn it off in Settings.
 - **The keyboard** works too: the arrow keys move through rows that open something,
   and Return opens one.
 
@@ -118,6 +134,7 @@ your Mac's settings.
 | Settings › Launch at Login | Starts at login, and relaunches Leeway if it ever crashes |
 | Settings › Compact Menu Bar | On by default: the tool with the most left. Off: every tool's figure |
 | Settings › Show Remaining | Counts down what's left, like the vendors' own screens |
+| Settings › Usage History | On by default. Records how high each allowance gets each week (or day, or month), to show under it. Turning it off deletes the record |
 | Settings › Limit Alerts | Off by default. Notifications when a tool passes 90%, fills up, comes back, or starts spending on-demand money |
 | Settings › Renew Expired Sign-ins | Off by default. See below |
 | Settings › Connect AI Tools… | Lets Grok Bot, Claude Code, Codex, Grok and other agents query usage (below) |
@@ -129,7 +146,7 @@ your Mac's settings.
 
 Agents can ask how much allowance is left before starting big work, or which tool
 has the most headroom. The app includes an [MCP](https://modelcontextprotocol.io)
-server with two read-only tools:
+server with three read-only tools:
 
 - **`get_usage`**: every provider's used and remaining percentage, each window and
   when it resets, whether it can take work now (`usable_now`, `blocked_until`,
@@ -142,6 +159,11 @@ server with two read-only tools:
   old ones (`figures_current`), then the most room. Optionally among some providers;
   names it doesn't know are listed in `unknown_providers`, and a filter that isn't a
   list of names is an error rather than ignored.
+- **`get_usage_history`**: for each allowance, how high it got in each of its last
+  26 weeks (or days, or months), the current one so far, and the average peak, so an
+  agent can tell whether this week is unusual. Optionally one provider. It's what the
+  app recorded while running (`last_seen_at` says whether it saw a period through),
+  and empty when Usage History is off.
 
 The reply carries `schema_version` (now 1). It only changes if a field is removed
 or changes meaning; new fields can be added without it. Agents never see your
@@ -175,7 +197,7 @@ settings for apps you configure by hand.
 
 **Without MCP:** `"$BIN" --json` prints the same data, and the running app keeps it
 current in `~/Library/Application Support/ai.cynaptix.leeway/usage.json`, readable
-only by you.
+only by you. `"$BIN" --history` prints the usage history.
 
 ## Privacy and what it touches
 
@@ -203,7 +225,10 @@ that request appears as a notification in the top-right corner, not a dialog, an
 Focus mode can hold it in Notification Center. Once allowed, Leeway sends a "Limit
 alerts are on" notification so you know they arrive.
 
-It writes its own preferences, the usage snapshot described above, a small log at `~/Library/Logs/Leeway.log` (where
+It writes its own preferences, the usage snapshot described above, the usage
+history (`history.json` in the same folder, readable only by you: percentages and
+dates, no account details; never sent anywhere, and deleted when you turn Usage
+History off), a small log at `~/Library/Logs/Leeway.log` (where
 the menu bar item is placed, only when that changes), and a launch agent in
 `~/Library/LaunchAgents` if you turn on Launch at Login.
 
@@ -267,6 +292,7 @@ the current window. Send one message in Muse.
     "$BIN" --print C X      # only some providers, by letter or name
     "$BIN" --selftest       # parser tests against built-in synthetic data
     "$BIN" --json           # machine-readable usage, as agents see it
+    "$BIN" --history        # the recorded usage history, as agents see it
     "$BIN" --login status   # or on, off
 
 When reporting a problem, include the `--setup` output. It shows plans, never your
@@ -274,6 +300,9 @@ account email. `LEEWAY_DEBUG=1` before any of these prints the shape of each ven
 reply to standard error (field names and types, no account details).
 
 ## Uninstall
+
+Installed with Homebrew: `brew uninstall --zap --cask d0s1nt/leeway/leeway` removes
+the app, its settings, history, log and launch agent; then do step 4. Otherwise:
 
 1. In the dropdown, turn off **Settings › Launch at Login**, then Quit.
 2. Delete `Leeway.app` from Applications.

@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Usage history: under each weekly allowance, how high it got in each of the last
+  six weeks, this week so far, and what it usually reaches (daily and monthly
+  allowances by day or month). Recorded only on this Mac while Leeway runs, as
+  percentages and dates; Settings › Usage History turns it off and deletes it.
+- For agents: a third MCP tool, `get_usage_history`, with up to 26 periods per
+  allowance and the average peak; `--history` prints the same.
+- Homebrew: `brew install --cask d0s1nt/leeway/leeway` after tapping and trusting
+  the tap (see Install). Each release updates the cask.
+- Build: GitHub Actions are pinned to exact commits (checkout 7.0.1, build
+  provenance 4.2.2, on Node 24), and Dependabot proposes updates monthly.
+
 ## 1.1.0
 
 Codex, Muse Code, Grok Build and Claude Code reviewed 1.0.0 independently; every

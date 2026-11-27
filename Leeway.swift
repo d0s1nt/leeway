@@ -1473,12 +1473,82 @@ final class UsageRowView: NSView {
     }
 }
 
-/// One provider's rows in the dropdown: header, a row per window, then any warning and note. Shared with the
-/// README preview renderer so the picture can't drift from the menu.
-func providerRows(_ s: ProviderStatus) -> [NSView] {
+/// Under an allowance: how high it got in each of its last few periods, as small bars (the current period, so far,
+/// drawn faintly at the end), and what it usually reaches. Lined up with the usage rows' columns.
+final class HistoryRowView: NSView {
+    static let shownPeriods = 6
+    let past: [UsageHistory.Period]
+    let current: UsageHistory.Period?
+    let unit: String
+    var average: Double { past.map(\.peak).reduce(0, +) / Double(max(1, past.count)) }
+
+    /// nil when there's no finished period to compare with yet. (A factory: an NSView init that returns nil
+    /// crashes when AppKit tears down the half-made view.)
+    static func make(_ series: UsageHistory.Series?, at now: Date = Date()) -> HistoryRowView? {
+        let (p, c) = UsageHistory.split(series, at: now)
+        return p.isEmpty ? nil : HistoryRowView(series, past: p, current: c)
+    }
+    private init(_ series: UsageHistory.Series?, past p: [UsageHistory.Period], current c: UsageHistory.Period?) {
+        past = Array(p.suffix(Self.shownPeriods)); current = c
+        unit = UsageHistory.unit(series?.windowSeconds)
+        super.init(frame: NSRect(x: 0, y: 0, width: menuWidth, height: 24))
+        let df = DateFormatter(); df.setLocalizedDateFormatFromTemplate(unit == "month" ? "MMMd" : "EEEMMMd")
+        var tip = ["How high it got each \(unit), up to when it reset:"]
+        tip += past.map { p in "\(unit.capitalized) to \(df.string(from: p.end)): \(String(format: "%.0f%%", p.peak)) used" + (p.end.timeIntervalSince(p.lastSeen) > (series?.windowSeconds ?? 86400) * 0.15 ? " (last seen \(df.string(from: p.lastSeen)))" : "") }
+        if let c = current { tip.append("This \(unit) so far: \(String(format: "%.0f%%", c.peak)) used") }
+        toolTip = tip.joined(separator: "\n")
+        setAccessibilityElement(true)
+        setAccessibilityRole(.staticText)
+        setAccessibilityLabel("\(label): usually reaches \(String(format: "%.0f", average)) percent used. " + past.map { String(format: "%.0f", $0.peak) }.joined(separator: ", "))
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    var label: String { past.count == 1 ? "Last \(unit)" : "Past \(past.count) \(unit)s" }
+    var summary: String {
+        let a = average
+        return showRemaining ? String(format: "usually %.0f%% left", max(0, 100 - a)) : String(format: "usually reaches %.0f%%", a)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let dim: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor]
+        (label as NSString).draw(at: NSPoint(x: rowInset + 21, y: 5), withAttributes: dim)
+        // One small vertical bar per period in the usage bar's column, each in a full-height track so its height
+        // reads as a share of 100%. This period so far is last, hollow. Show Remaining flips them like the bars.
+        let area = NSRect(x: rowInset + 133, y: 3, width: 96, height: 18)
+        let slots = Self.shownPeriods + 1, gap: CGFloat = 5
+        let bw = (area.width - gap * CGFloat(slots - 1)) / CGFloat(slots)
+        let all: [(UsageHistory.Period, Bool)] = past.map { ($0, false) } + (current.map { [($0, true)] } ?? [])
+        let start = slots - all.count
+        for (i, (p, now)) in all.enumerated() {
+            let x = area.minX + CGFloat(start + i) * (bw + gap)
+            NSColor.labelColor.withAlphaComponent(0.1).setFill()
+            NSBezierPath(roundedRect: NSRect(x: x, y: area.minY, width: bw, height: area.height), xRadius: 2, yRadius: 2).fill()
+            let v = shownPercent(max(0, min(100, p.peak)))
+            let r = NSRect(x: x, y: area.minY, width: bw, height: max(2, area.height * CGFloat(v / 100)))
+            let path = NSBezierPath(roundedRect: r, xRadius: 2, yRadius: 2)
+            if now {
+                Brand.usage(p.peak).setStroke(); path.lineWidth = 1
+                NSBezierPath(roundedRect: r.insetBy(dx: 0.5, dy: 0.5), xRadius: 1.5, yRadius: 1.5).stroke()
+            } else { Brand.usage(p.peak).setFill(); path.fill() }
+        }
+        let t = NSAttributedString(string: summary, attributes: dim)
+        t.draw(at: NSPoint(x: menuWidth - rowInset - t.size().width, y: 5))
+    }
+}
+
+/// One provider's rows in the dropdown: header, a row per window (with its history under an allowance, once
+/// there's a finished period to show), then any warning and note. Shared with the README preview renderer so the
+/// picture can't drift from the menu.
+func providerRows(_ s: ProviderStatus, history: UsageHistory.Store = [:]) -> [NSView] {
     var rows: [NSView] = [HeaderRowView(s)]
     let capInReserve = s.availability == .available
-    rows += s.windows.map { UsageRowView($0, quiet: $0.kind == .spend && capInReserve) as NSView }
+    // History goes under the tool-wide allowances; with only per-model ones (Gemini), under the most-used one.
+    let wide = s.windows.filter { $0.headline && !$0.scoped }
+    let withHistory = wide.isEmpty ? s.headlineWindows.max { $0.usedPercent < $1.usedPercent }.map { [$0.label] } ?? [] : wide.map(\.label)
+    for w in s.windows {
+        rows.append(UsageRowView(w, quiet: w.kind == .spend && capInReserve))
+        if withHistory.contains(w.label), let h = HistoryRowView.make(history[UsageHistory.key(s.name, w.label)]) { rows.append(h) }
+    }
     if capInReserve, s.windows.contains(where: { $0.kind == .spend && $0.isFull }) {
         let back = s.headlineWindows.compactMap(\.resetsAt).max().map { " until it resets in \(relative($0))" } ?? ""
         rows.append(NoteRowView("On-demand cap is used up. Included usage still has room; once that runs out, \(s.name) stops\(back).", maxLines: 2))
@@ -1635,6 +1705,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     /// Alerts compare one live refresh with the last; the figures saved before a restart don't count, or every
     /// change while Leeway was closed would alert at launch.
     var hadLiveRefresh = false
+    /// Each allowance's peak per period, recorded after every live refresh (unless turned off), saved on this Mac only.
+    var history: UsageHistory.Store = [:]
+    let historyQueue = DispatchQueue(label: "leeway.history")
 
     func applicationDidFinishLaunching(_ n: Notification) {
         item.autosaveName = statusAutosaveName
@@ -1647,6 +1720,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         // Start from the last saved figures, so a restart never blanks the menu and a rate limit on the first
         // fetch keeps showing them (marked stale) instead of an error.
         statuses = UsageExport.load()
+        if UsageHistory.enabled { history = UsageHistory.load() }
         if !statuses.isEmpty { updateTitle() }
         rebuildMenu()
         // Offline, every tool would fail on its own row; say it once, and refresh as soon as the network is back
@@ -1732,6 +1806,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
                 self.hadLiveRefresh = true
                 let snapshot = self.statuses
                 DispatchQueue.global(qos: .utility).async { UsageExport.writeSnapshot(snapshot) }
+                if UsageHistory.enabled {
+                    self.history = UsageHistory.record(snapshot, into: self.history)
+                    let h = self.history
+                    self.historyQueue.async { UsageHistory.save(h) }
+                }
                 self.refreshing = false
                 self.updateTitle()
                 self.rebuildMenu()
@@ -1829,7 +1908,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         // Providers with figures first, then the ones still waiting on something, kept to a line or two each.
         let shown = statuses.filter { $0.missing == nil }
         for s in shown.filter({ !$0.windows.isEmpty }) + shown.filter({ $0.windows.isEmpty }) {
-            for v in providerRows(s) {
+            for v in providerRows(s, history: UsageHistory.enabled ? history : [:]) {
                 let mi = NSMenuItem(); mi.view = v
                 // A row that opens something takes an action, so the arrow keys can reach it and Return opens it.
                 if let link = (v as? LinkRowView)?.link { mi.action = #selector(openLink); mi.target = self; mi.representedObject = link }
@@ -1858,6 +1937,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         toggle("Launch at Login", #selector(toggleLogin), LoginAgent.isEnabled, "Starts at login and relaunches automatically if it ever crashes")
         toggle("Compact Menu Bar", #selector(toggleCompact), compact, "Show only the tool with the most room left, so the item fits beside the notch")
         toggle("Show Remaining", #selector(toggleRemaining), showRemaining, "Show what's left instead of what's used, like the vendors' own usage screens")
+        toggle("Usage History", #selector(toggleHistory), UsageHistory.enabled, "Keeps how high each allowance got each week (or day, or month) on this Mac, to show under it. Turning this off deletes it")
         toggle("Limit Alerts", #selector(toggleAlerts), limitAlerts, "Notifications on this Mac when a tool passes 90%, fills up, comes back, or starts spending on-demand money")
         toggle("Renew Expired Sign-ins", #selector(toggleRefresh), allowTokenRefresh, "Off: read-only. On: renews Claude Code, Codex and Gemini sign-ins when they expire and saves them back")
         settings.addItem(.separator())
@@ -2121,6 +2201,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         }
     }
 
+    @objc func toggleHistory() {
+        if UsageHistory.enabled {
+            let a = NSAlert()
+            a.messageText = "Turn off usage history?"
+            a.informativeText = "Leeway will stop recording how high each allowance gets and delete what it has recorded so far. It can't be brought back."
+            a.addButton(withTitle: "Turn Off and Delete"); a.addButton(withTitle: "Cancel")
+            NSApp.activate(ignoringOtherApps: true)
+            guard a.runModal() == .alertFirstButtonReturn else { return }
+            UserDefaults.standard.set(true, forKey: "historyOff")
+            history = [:]
+            historyQueue.async { UsageHistory.erase() }
+        } else {
+            UserDefaults.standard.set(false, forKey: "historyOff")
+            history = UsageHistory.load()
+        }
+        rebuildMenu()
+    }
+
     @objc func toggleRemaining() {
         UserDefaults.standard.set(!showRemaining, forKey: "showRemaining")
         updateTitle(); rebuildMenu()
@@ -2283,11 +2381,21 @@ if let i = CommandLine.arguments.firstIndex(of: "--render-preview"), i + 1 < Com
     // --live renders this Mac's real figures instead, for checking the layout; never commit that image.
     let source = CommandLine.arguments.contains("--live") ? fetchAll().filter { $0.missing == nil } : demo
     let ordered = source.filter { !$0.windows.isEmpty } + source.filter { $0.windows.isEmpty }
+    // Invented past weeks for the demo; --live uses this Mac's own history.
+    func past(_ name: String, _ label: String, _ peaks: [Double], current: Double, resetIn: Double) -> (String, UsageHistory.Series) {
+        let end = Date().addingTimeInterval(resetIn * day + 600)
+        let ps = peaks.enumerated().map { i, p in
+            UsageHistory.Period(end: end.addingTimeInterval(-Double(peaks.count - i) * oneWeek), peak: p, lastSeen: end.addingTimeInterval(-Double(peaks.count - i) * oneWeek - 3600)) }
+        return (UsageHistory.key(name, label), UsageHistory.Series(windowSeconds: oneWeek, periods: ps + [.init(end: end, peak: current, lastSeen: Date())]))
+    }
+    let demoHistory = Dictionary(uniqueKeysWithValues: [past("Claude", "Weekly (all)", [58, 71, 64, 88, 52, 67], current: 46, resetIn: 2.6),
+                                                        past("Codex", "Weekly limit", [22, 35, 41], current: 31, resetIn: 4.2)])
+    let history = CommandLine.arguments.contains("--live") ? UsageHistory.load() : demoHistory
     let dark = CommandLine.arguments.contains("--dark")
     let appearance = NSAppearance(named: dark ? .darkAqua : .aqua)!
     var rows: [NSView] = []
     for st in ordered {
-        rows += providerRows(st)
+        rows += providerRows(st, history: history)
         let sep = NSBox(frame: NSRect(x: 0, y: 0, width: menuWidth, height: 9)); sep.boxType = .custom; sep.borderWidth = 0; sep.fillColor = .clear
         let line = NSBox(frame: NSRect(x: rowInset, y: 4, width: menuWidth - rowInset * 2, height: 1)); line.boxType = .custom; line.borderWidth = 0; line.fillColor = .separatorColor
         sep.addSubview(line); rows.append(sep)
@@ -2449,6 +2557,116 @@ enum UsageExport {
     }
 }
 
+// MARK: - Usage history, kept on this Mac only
+
+/// How high each allowance got in each of its periods (a week, a day, a month), so the dropdown can show how this
+/// week compares with the last few and agents can see what's typical. Only percentages and dates: no account,
+/// nothing sent anywhere. Only the menu bar app writes it, so there's one writer; agents read it.
+enum UsageHistory {
+    struct Period: Equatable {
+        var end: Date          // when the period resets
+        var peak: Double       // the highest figure seen in it
+        var lastSeen: Date     // the last reading in it: well before `end` means the period's close was missed
+    }
+    struct Series: Equatable {
+        var windowSeconds: TimeInterval?
+        var periods: [Period]
+    }
+    /// Keyed by `key(provider:window:)`.
+    typealias Store = [String: Series]
+    static let maxPeriods = 26
+    static var url: URL { URL(fileURLWithPath: home("Library/Application Support/\(bundleID)/history.json")) }
+    /// On unless turned off in Settings.
+    static var enabled: Bool { !UserDefaults.standard.bool(forKey: "historyOff") }
+    static func key(_ provider: String, _ window: String) -> String { UsageExport.id(provider) + "/" + window }
+
+    /// Folds one refresh into the store. Only fresh, successful readings of allowances with a known reset count:
+    /// an old or assumed figure would record a peak that never happened. Pure, so it's testable.
+    static func record(_ statuses: [ProviderStatus], into store: Store, at now: Date = Date()) -> Store {
+        var out = store
+        for s in statuses where s.error == nil && s.staleSince == nil && s.missing == nil && now.timeIntervalSince(s.fetchedAt) < 3600 {
+            for w in s.windows where w.headline && !w.assumedReset {
+                guard let end = w.resetsAt, end > now else { continue }
+                let k = key(s.name, w.label)
+                var series = out[k] ?? Series(windowSeconds: w.windowSeconds, periods: [])
+                if let len = w.windowSeconds { series.windowSeconds = len }
+                let used = max(0, min(100, w.usedPercent))
+                if var last = series.periods.last, now < last.end.addingTimeInterval(300),
+                   end < last.end.addingTimeInterval(max(3600, (series.windowSeconds ?? 86400) / 2)) {
+                    // Same period. Its reset time can wobble a little between readings (some vendors send
+                    // "resets in N seconds"); the latest one stands.
+                    last.peak = max(last.peak, used); last.end = end; last.lastSeen = now
+                    series.periods[series.periods.count - 1] = last
+                } else {
+                    series.periods.append(Period(end: end, peak: used, lastSeen: now))
+                    if series.periods.count > maxPeriods { series.periods.removeFirst(series.periods.count - maxPeriods) }
+                }
+                out[k] = series
+            }
+        }
+        // A window that hasn't been seen for four months (renamed, or the plan changed) is dropped.
+        return out.filter { ($0.value.periods.last?.lastSeen ?? .distantPast) > now.addingTimeInterval(-120 * 86400) }
+    }
+
+    /// Finished periods, oldest first, and the current one if there is one.
+    static func split(_ series: Series?, at now: Date = Date()) -> (past: [Period], current: Period?) {
+        let ps = series?.periods ?? []
+        let past = ps.filter { $0.end <= now }
+        return (past, ps.last.flatMap { $0.end > now ? $0 : nil })
+    }
+    /// "week", "day", "month", or "period", from the window's length.
+    static func unit(_ len: TimeInterval?) -> String {
+        guard let l = len else { return "period" }
+        if abs(l - oneWeek) < oneDay { return "week" }
+        if abs(l - oneDay) < 3 * 3600 { return "day" }
+        if l >= 27 * oneDay && l <= 32 * oneDay { return "month" }
+        return "period"
+    }
+
+    static func load(from url: URL = url) -> Store {
+        guard let d = try? Data(contentsOf: url), let o = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],
+              let ws = o["windows"] as? [String: [String: Any]] else { return [:] }
+        return ws.compactMapValues { w in
+            let ps = (w["periods"] as? [[String: Any]] ?? []).compactMap { p -> Period? in
+                guard let e = iso(p["resets_at"] as? String), let peak = p["peak_used_percent"] as? Double else { return nil }
+                return Period(end: e, peak: peak, lastSeen: iso(p["last_seen_at"] as? String) ?? e)
+            }
+            return ps.isEmpty ? nil : Series(windowSeconds: w["window_seconds"] as? Double, periods: ps)
+        }
+    }
+    static func fileObject(_ store: Store) -> [String: Any] {
+        ["version": 1, "windows": store.mapValues { s -> [String: Any] in
+            ["window_seconds": s.windowSeconds.map { Int($0) } as Any? ?? NSNull(),
+             "periods": s.periods.map { ["resets_at": UsageExport.isoString($0.end), "peak_used_percent": UsageExport.round1($0.peak), "last_seen_at": UsageExport.isoString($0.lastSeen)] }]
+        }]
+    }
+    static func save(_ store: Store, to url: URL = url) {
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try writeKeepingPermissions(try JSONSerialization.data(withJSONObject: fileObject(store), options: [.sortedKeys]), to: url.path)
+        } catch {}
+    }
+    static func erase() { try? FileManager.default.removeItem(at: url) }
+
+    /// What agents get: per allowance, its finished periods' peaks and the current one so far.
+    static func agentObject(_ store: Store, enabled: Bool = UsageHistory.enabled, at now: Date = Date()) -> [String: Any] {
+        let windows: [[String: Any]] = store.keys.sorted().compactMap { k in
+            guard let s = store[k], let slash = k.firstIndex(of: "/") else { return nil }
+            let (past, current) = split(s, at: now)
+            let avg = past.isEmpty ? nil : past.map(\.peak).reduce(0, +) / Double(past.count)
+            return ["provider_id": String(k[..<slash]), "window": String(k[k.index(after: slash)...]), "unit": unit(s.windowSeconds),
+                    "window_seconds": s.windowSeconds.map { Int($0) } as Any? ?? NSNull(),
+                    "average_peak_percent": avg.map(UsageExport.round1) as Any? ?? NSNull(),
+                    "periods": (past + [current].compactMap { $0 }).map { p -> [String: Any] in
+                        ["resets_at": UsageExport.isoString(p.end), "peak_used_percent": UsageExport.round1(p.peak),
+                         "last_seen_at": UsageExport.isoString(p.lastSeen), "finished": p.end <= now] }]
+        }
+        let note: Any = !enabled ? "Usage history is turned off in Leeway's Settings." as Any
+            : windows.isEmpty ? "No history yet. The menu bar app records each allowance's peak while it runs." as Any : NSNull()
+        return ["schema_version": 1, "generated_at": UsageExport.isoString(now), "windows": windows, "note": note]
+    }
+}
+
 /// A Model Context Protocol server over stdio, so AI agents can ask how much allowance is left before choosing
 /// where to send work. Read-only; it reuses the menu bar app's latest figures when they're fresh.
 enum MCPServer {
@@ -2463,6 +2681,11 @@ enum MCPServer {
          "title": "Tool with the most allowance left",
          "description": "Ranks the AI tools that are set up on this Mac for taking work now: tools that aren't blocked by a full short window come first, free allowance before paid on-demand, then the most remaining allowance. Each entry says whether it's usable now, when a blocked tool is back, and how old the figures are. Optionally restrict to some providers.",
          "inputSchema": ["type": "object", "properties": ["among": ["type": "array", "items": ["type": "string"], "description": "Optional provider ids or names to choose between."]], "additionalProperties": false],
+         "annotations": ["readOnlyHint": true, "openWorldHint": false]],
+        ["name": "get_usage_history",
+         "title": "AI tool usage history",
+         "description": "How high each AI tool's allowance got in each of its recent periods (weeks, days or months), up to the last 26, plus the current period so far and the average peak. Recorded on this Mac by the Leeway menu bar app while it runs; useful for judging whether this week's usage is unusual or how much headroom is typical.",
+         "inputSchema": ["type": "object", "properties": ["provider": ["type": "string", "description": "Optional provider id or name, e.g. claude, codex, gemini, grok, grok-bot, muse."]], "additionalProperties": false],
          "annotations": ["readOnlyHint": true, "openWorldHint": false]],
     ]
 
@@ -2481,7 +2704,7 @@ enum MCPServer {
     }
 
     /// One JSON-RPC message in, at most one out (notifications get no reply). Pure apart from `load`, so it's testable.
-    static func handle(_ msg: [String: Any], load: () -> Data) -> [String: Any]? {
+    static func handle(_ msg: [String: Any], load: () -> Data, history: () -> [String: Any] = { UsageHistory.agentObject(UsageHistory.load()) }) -> [String: Any]? {
         let id = msg["id"]
         guard let method = msg["method"] as? String else { return nil }
         if id == nil { return nil }   // notification, e.g. notifications/initialized
@@ -2494,12 +2717,27 @@ enum MCPServer {
             return reply(["protocolVersion": protocolVersions.contains(asked) ? asked : protocolVersions[0],
                           "capabilities": ["tools": ["listChanged": false]],
                           "serverInfo": ["name": mcpServerName, "title": productName, "version": appVersion],
-                          "instructions": "Read-only usage figures for the AI coding tools on this Mac. Call get_usage before starting a large task, or best_available to choose which tool has headroom."])
+                          "instructions": "Read-only usage figures for the AI coding tools on this Mac. Call get_usage before starting a large task, or best_available to choose which tool has headroom. get_usage_history shows how high each allowance usually gets."])
         case "ping": return reply([:])
         case "tools/list": return reply(["tools": tools])
         case "tools/call":
             let name = params["name"] as? String ?? ""
             let args = params["arguments"] as? [String: Any] ?? [:]
+            if name == "get_usage_history" {
+                // Doesn't need the live figures, so it doesn't fetch them.
+                if args["provider"] != nil && !(args["provider"] is String) {
+                    return reply(result(["error": "provider must be a string, e.g. \"claude\"."], isError: true))
+                }
+                var h = history()
+                if let want = args["provider"] as? String, !want.isEmpty {
+                    let w = UsageExport.id(want)
+                    guard allProviders.contains(where: { UsageExport.id($0.name) == w }) else {
+                        return reply(result(["error": "No provider called \(want). Known: claude, codex, gemini, grok, grok-bot, muse."], isError: true))
+                    }
+                    h["windows"] = (h["windows"] as? [[String: Any]] ?? []).filter { ($0["provider_id"] as? String) == w }
+                }
+                return reply(result(h))
+            }
             var usage = usageObject(load)
             var providers = usage["providers"] as? [[String: Any]] ?? []
             switch name {
@@ -2696,7 +2934,7 @@ enum SelfTest {
         check(((ini?["result"] as? [String: Any])?["protocolVersion"] as? String) == "2025-03-26", "mcp negotiates the client's version")
         check(MCPServer.handle(["jsonrpc": "2.0", "method": "notifications/initialized"], load: load) == nil, "mcp notifications get no reply")
         let tl = ((MCPServer.handle(["jsonrpc": "2.0", "id": 2, "method": "tools/list"], load: load)?["result"] as? [String: Any])?["tools"] as? [[String: Any]]) ?? []
-        check(tl.map { $0["name"] as? String ?? "" } == ["get_usage", "best_available"], "mcp tools")
+        check(tl.map { $0["name"] as? String ?? "" } == ["get_usage", "best_available", "get_usage_history"], "mcp tools")
         let gu = (MCPServer.handle(["jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": ["name": "get_usage", "arguments": ["provider": "Codex"]]], load: load)?["result"] as? [String: Any])?["structuredContent"] as? [String: Any]
         check((gu?["providers"] as? [[String: Any]])?.count == 1, "mcp get_usage filter")
         let ba = (MCPServer.handle(["jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": ["name": "best_available", "arguments": [:]]], load: load)?["result"] as? [String: Any])?["structuredContent"] as? [String: Any]
@@ -2897,6 +3135,68 @@ enum SelfTest {
         check(UsageRowView.dollarText(.init(used: 1234, cap: 5000), compact: true) == "$1.2k/$5k", "compact dollars")
         check(!agentRun || !allowTokenRefresh, "agents never renew sign-ins")
 
+        // Usage history: one peak per period, only from fresh allowance readings.
+        let t0 = Date(timeIntervalSince1970: 1_900_000_000)
+        func hs(_ used: Double, resetIn: TimeInterval, at: Date, kind: UsageWindow.Kind = .allowance, label: String = "Weekly limit", error: String? = nil, stale: Bool = false, assumed: Bool = false) -> ProviderStatus {
+            var st = ProviderStatus(name: "Codex", short: "X")
+            st.windows = [UsageWindow(label: label, usedPercent: used, resetsAt: at.addingTimeInterval(resetIn), kind: kind, windowSeconds: oneWeek, assumedReset: assumed)]
+            st.fetchedAt = at; st.error = error; if stale { st.staleSince = at }
+            return st
+        }
+        var hstore = UsageHistory.record([hs(20, resetIn: 3 * oneDay, at: t0)], into: [:], at: t0)
+        let t1 = t0.addingTimeInterval(oneDay)
+        hstore = UsageHistory.record([hs(35, resetIn: 2 * oneDay + 40, at: t1)], into: hstore, at: t1)   // reset time wobbles by 40s
+        let hk = UsageHistory.key("Codex", "Weekly limit")
+        check(hk == "codex/Weekly limit" && hstore[hk]?.periods.count == 1 && hstore[hk]?.periods.first?.peak == 35, "history: one period, highest figure \(String(describing: hstore[hk]))")
+        // Errors, old figures, assumed resets and short windows record nothing.
+        let t2 = t1.addingTimeInterval(3600)
+        let ignored = UsageHistory.record([hs(90, resetIn: oneDay, at: t2, error: "HTTP 500"), hs(91, resetIn: oneDay, at: t2, stale: true),
+                                           hs(92, resetIn: oneDay, at: t2, assumed: true), hs(93, resetIn: 3600, at: t2, kind: .short, label: "5-hour")], into: hstore, at: t2)
+        check(ignored == hstore, "history ignores errors, old figures, assumed resets and short windows")
+        // After the reset, a new period; the old one is finished.
+        let t3 = t0.addingTimeInterval(3 * oneDay + 3600)
+        hstore = UsageHistory.record([hs(5, resetIn: oneWeek - 3600, at: t3)], into: hstore, at: t3)
+        let (hpast, hcur) = UsageHistory.split(hstore[hk], at: t3)
+        check(hpast.map(\.peak) == [35] && hcur?.peak == 5, "history: new period after the reset \(hpast) \(String(describing: hcur))")
+        // A window whose reset slides forward with every reading stays one period.
+        var slide: UsageHistory.Store = [:]
+        for i in 0..<10 { let at = t0.addingTimeInterval(Double(i) * 1800); slide = UsageHistory.record([hs(Double(i), resetIn: oneWeek, at: at)], into: slide, at: at) }
+        check(slide[hk]?.periods.count == 1 && slide[hk]?.periods.first?.peak == 9, "history: a sliding reset is one period")
+        // Capped at 26 periods.
+        var many: UsageHistory.Store = [:]
+        for i in 0..<30 { let at = t0.addingTimeInterval(Double(i) * oneWeek); many = UsageHistory.record([hs(Double(i), resetIn: oneWeek - 60, at: at)], into: many, at: at) }
+        check(many[hk]?.periods.count == UsageHistory.maxPeriods && many[hk]?.periods.first?.peak == 4, "history keeps the last 26 periods")
+        // Saved privately and read back.
+        let htmp = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("leeway-selftest-h-\(getpid()).json")
+        UsageHistory.save(hstore, to: htmp)
+        let hback = UsageHistory.load(from: htmp)
+        let hperm = ((try? FileManager.default.attributesOfItem(atPath: htmp.path))?[.posixPermissions] as? NSNumber)?.intValue
+        try? FileManager.default.removeItem(at: htmp)
+        check(hback[hk]?.periods.map(\.peak) == [35, 5] && hback[hk]?.windowSeconds == oneWeek && hperm == 0o600, "history file round trip, owner-only \(String(describing: hperm))")
+        // Agents' view.
+        let ho = UsageHistory.agentObject(hstore, enabled: true, at: t3)
+        let hw = (ho["windows"] as? [[String: Any]])?.first
+        check(hw?["provider_id"] as? String == "codex" && hw?["window"] as? String == "Weekly limit" && hw?["unit"] as? String == "week" && hw?["average_peak_percent"] as? Double == 35
+              && (hw?["periods"] as? [[String: Any]])?.map { $0["finished"] as? Bool ?? false } == [true, false], "history for agents \(ho)")
+        check(UsageHistory.agentObject([:], enabled: false)["note"] as? String != nil, "history says when it's turned off")
+        let hcall = { (args: [String: Any]) in (MCPServer.handle(["jsonrpc": "2.0", "id": 12, "method": "tools/call", "params": ["name": "get_usage_history", "arguments": args]], load: { Data() }, history: { ho })?["result"] as? [String: Any]) }
+        check(((hcall(["provider": "codex"])?["structuredContent"] as? [String: Any])?["windows"] as? [Any])?.count == 1
+              && ((hcall(["provider": "claude"])?["structuredContent"] as? [String: Any])?["windows"] as? [Any])?.count == 0, "mcp get_usage_history filters by provider")
+        check(hcall(["provider": "nope"])?["isError"] as? Bool == true && hcall(["provider": 3])?["isError"] as? Bool == true, "mcp get_usage_history rejects unknown or mistyped providers")
+        // The row: only once a period has finished; under the tool-wide allowance, not a per-model one.
+        check(HistoryRowView.make(UsageHistory.Series(windowSeconds: oneWeek, periods: [.init(end: Date().addingTimeInterval(3600), peak: 9, lastSeen: Date())])) == nil, "no history row before a period has finished")
+        let hnow = Date()
+        let hser = UsageHistory.Series(windowSeconds: oneWeek, periods: [.init(end: hnow.addingTimeInterval(-oneWeek), peak: 60, lastSeen: hnow.addingTimeInterval(-oneWeek)),
+                                                                        .init(end: hnow.addingTimeInterval(-60), peak: 80, lastSeen: hnow.addingTimeInterval(-120)),
+                                                                        .init(end: hnow.addingTimeInterval(oneWeek), peak: 10, lastSeen: hnow)])
+        let hrow = HistoryRowView.make(hser)
+        check(hrow?.label == "Past 2 weeks" && hrow?.average == 70 && hrow?.current?.peak == 10, "history row \(hrow?.label ?? "nil")")
+        var hc = blank("Claude")
+        hc.windows = [UsageWindow(label: "Weekly (all)", usedPercent: 40, resetsAt: hnow.addingTimeInterval(oneDay)), UsageWindow(label: "Weekly Opus", usedPercent: 10, resetsAt: hnow.addingTimeInterval(oneDay), scoped: true)]
+        let hrows = providerRows(hc, history: [UsageHistory.key("Claude", "Weekly (all)"): hser, UsageHistory.key("Claude", "Weekly Opus"): hser])
+        check(hrows.count == 4 && hrows[2] is HistoryRowView, "history row under the tool-wide allowance only \(hrows.map { String(describing: type(of: $0)) })")
+        check(UsageHistory.unit(oneDay) == "day" && UsageHistory.unit(30 * oneDay) == "month" && UsageHistory.unit(nil) == "period", "history units")
+
         print("selftest: \(passes) passed, \(failures) failed (\(ProcessInfo.processInfo.machineHardwareName))")
         return failures == 0 ? 0 : 1
     }
@@ -2921,6 +3221,12 @@ if CommandLine.arguments.contains("--json") {
 }
 
 if CommandLine.arguments.contains("--mcp-config") { print(MCPServer.configJSON); exit(0) }
+
+if CommandLine.arguments.contains("--history") {
+    // Same JSON as the MCP tool get_usage_history.
+    let d = (try? JSONSerialization.data(withJSONObject: UsageHistory.agentObject(UsageHistory.load()), options: [.prettyPrinted, .sortedKeys])) ?? Data("{}".utf8)
+    writeStdout(d + Data("\n".utf8)); exit(0)
+}
 
 if CommandLine.arguments.contains("--setup") {
     // Headless version of the Setup Check window.
@@ -3000,7 +3306,7 @@ enum LoginAgent {
     }
 }
 let launchedByAgent = ProcessInfo.processInfo.environment["XPC_SERVICE_NAME"] == LoginAgent.label
-let headlessRun = ["--print", "--setup", "--selftest", "--json", "--mcp", "--mcp-config", "--login", "--render-marks", "--render-icon", "--render-preview", "--render-menubar"].contains { CommandLine.arguments.contains($0) }
+let headlessRun = ["--print", "--setup", "--selftest", "--json", "--history", "--mcp", "--mcp-config", "--login", "--render-marks", "--render-icon", "--render-preview", "--render-menubar"].contains { CommandLine.arguments.contains($0) }
 
 // Must come after LoginAgent and its globals: top-level code runs in file order, and touching a global before its
 // line has run crashes (this handler once sat above them and segfaulted).
