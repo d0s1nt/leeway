@@ -2,8 +2,8 @@
 # Install:  brew tap d0s1nt/leeway https://github.com/d0s1nt/leeway
 #           brew install --cask leeway
 cask "leeway" do
-  version "1.1.0"
-  sha256 "d8564aa63c12088a07102fa4b0d1a6e0aa5fdb9af1dc9a4e9fcab020354be73c"
+  version "1.2.0"
+  sha256 "cbf9c8c0e49bc975d7e26cfe63baeaab970c06aa472f30e400a5871d22f0dbd9"
 
   url "https://github.com/d0s1nt/leeway/releases/download/v#{version}/Leeway-#{version}.dmg"
   name "Leeway"
