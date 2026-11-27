@@ -63,7 +63,7 @@ notarized. Upgrading quits Leeway; open it again from Applications.
 Releases are built by GitHub Actions from the tagged commit, with a signed build
 provenance attestation. With the GitHub CLI:
 
-    gh attestation verify Leeway-1.1.0.dmg --repo d0s1nt/leeway
+    gh attestation verify Leeway-1.2.0.dmg --repo d0s1nt/leeway
 
 `SHA256SUMS.txt` on each release lists the checksums.
 </details>

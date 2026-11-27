@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.2.0
 
 - Usage history: under each weekly allowance, how high it got in each of the last
   six weeks, this week so far, and what it usually reaches (daily and monthly
