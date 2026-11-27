@@ -20,7 +20,11 @@ scan() {  # $1 = label, stdin = text
 git grep -I -h -o -E "$PAT|$PII" -- . 2>/dev/null | scan "tracked text files (working tree)"
 git ls-files -o --exclude-standard -z | xargs -0 grep -I -h -o -E "$PAT|$PII" 2>/dev/null | scan "untracked text files about to be added"
 # Binary assets: only image formats are expected, and they must not carry text metadata such as author or paths.
-for f in $(git ls-files | grep -E '\.(png|icns|jpg|jpeg|gif)$'); do strings -n 8 "$f" | scan "binary asset $f" >/dev/null || { echo "FOUND in $f"; fail=1; }; done
+# Quiet when clean; a hit names the file and what was found.
+for f in $(git ls-files | grep -E '\.(png|icns|jpg|jpeg|gif)$'); do
+  out=$(strings -n 8 "$f" | scan "binary asset $f")
+  [[ "$out" == clean:* ]] || { echo "$out"; fail=1; }
+done
 echo "checked: binary assets"
 git log -p --all --format='commit %H %an <%ae>%n%B' 2>/dev/null | scan "git history (all commits, messages and authors)"
 for bin in dist/*.app/Contents/MacOS/*(N); do strings -n 8 "$bin" | scan "release binary $bin"; done

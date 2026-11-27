@@ -52,7 +52,7 @@ Needs macOS 13 or later, on Apple Silicon or Intel.
 Releases are built by GitHub Actions from the tagged commit, with a signed build
 provenance attestation. With the GitHub CLI:
 
-    gh attestation verify Leeway-1.0.0.dmg --repo d0s1nt/leeway
+    gh attestation verify Leeway-1.1.0.dmg --repo d0s1nt/leeway
 
 `SHA256SUMS.txt` on each release lists the checksums.
 </details>
@@ -101,15 +101,20 @@ your Mac's settings.
 - **The tick on each bar** marks how much of the window's time has passed. A bar
   past its tick is being used faster than the week is going. Hover a row to see
   whether, at this rate, it runs out before it resets.
-- **"stale"** means the last refresh failed and older figures are shown. Figures
-  whose reset time has passed since show as "reset" until the next refresh.
+- **"55% used · 2h old"** in grey means these are older figures: the last refresh
+  failed, or the vendor sent nothing new, and the row underneath says which. Old
+  figures are never preferred over current ones as the tool to use next, and when the
+  menu bar's pick is old it says "· old". Figures whose reset time has passed show as
+  "reset" until the next refresh, and "resetting…" in the minutes around a reset.
 - **Grok Bot's figures** are the ones the Grok Bot app saved on its last check;
   Leeway can't ask for new ones. When they're over 15 minutes old the row says when
-  Grok Bot last checked.
+  Grok Bot last checked, and while Grok Bot is closed, clicking the row opens it.
+- **The keyboard** works too: the arrow keys move through rows that open something,
+  and Return opens one.
 
 | Menu item | What it does |
 |---|---|
-| Refresh Now | Fetches every provider again; shows when it last did |
+| Refresh Now | Fetches every provider again; shows when it last did. Greyed out while offline |
 | Settings › Launch at Login | Starts at login, and relaunches Leeway if it ever crashes |
 | Settings › Compact Menu Bar | On by default: the tool with the most left. Off: every tool's figure |
 | Settings › Show Remaining | Counts down what's left, like the vendors' own screens |
@@ -133,15 +138,20 @@ server with two read-only tools:
   Failures carry an `error_kind`: `needs_sign_in`, `rate_limited`, `format_changed`,
   `offline`, `keychain` or `other`, so agents never have to read the message.
 - **`best_available`**: the tools that are set up, ranked for taking work now:
-  tools that aren't blocked first, free allowance before paid, then the most room.
+  tools that aren't blocked first, free allowance before paid, current figures before
+  old ones (`figures_current`), then the most room. Optionally among some providers;
+  names it doesn't know are listed in `unknown_providers`, and a filter that isn't a
+  list of names is an error rather than ignored.
 
 The reply carries `schema_version` (now 1). It only changes if a field is removed
 or changes meaning; new fields can be added without it. Agents never see your
 account email or any token, and vendor error text is shown with anything that looks
-like an email or token removed. The server reuses the figures the
-menu bar app fetched in the last 10 minutes, so frequent questions don't hit vendor
-rate limits. If it has to fetch them itself, it saves them for the next agent, and it
-never waits more than 15 seconds for a keychain prompt nobody is there to answer.
+like an email or token removed. While the menu bar app is running, the server
+answers from the app's figures (each provider says how old they are), so frequent
+questions don't hit vendor rate limits and never race the app. With the app closed,
+it reuses figures under 10 minutes old, or fetches them itself and saves them for the
+next agent, keeping the last good figures if a fetch fails. It never renews a sign-in,
+and never waits more than 15 seconds for a keychain prompt nobody is there to answer.
 
 **The easy way:** choose **Settings › Connect AI Tools…** in the dropdown. It adds the server to
 Claude Code, Codex and the Grok CLI using each tool's own command, and copies the
@@ -199,18 +209,21 @@ the menu bar item is placed, only when that changes), and a launch agent in
 
 ### Renew Expired Sign-ins
 
-Claude Code and Codex sign-ins expire, and each tool renews its own when you use it.
+Claude Code, Codex and Gemini sign-ins expire, and each tool renews its own when you use it.
 If a row says its sign-in has expired, run that tool once.
 
 Turning on **Renew Expired Sign-ins** lets Leeway do the renewal itself, using the
 tool's own sign-in service, and save the new tokens where the tool keeps them. That
-keeps rows fresh for tools you haven't used in a while. The cost: those tokens are
-single-use, so if the tool renews at the same moment, you may have to sign in to it
-again. It's off unless you choose it.
+keeps rows fresh for tools you haven't used in a while. The cost: Claude Code's and
+Codex's tokens are single-use, so if the tool renews at the same moment, you may have
+to sign in to it again. It's off unless you choose it, and agents using the MCP
+server never renew sign-ins, whatever the setting.
 
 Gemini access tokens last an hour, so those are renewed in memory either way, using
 the client details from your own Gemini CLI install. Google doesn't rotate the
 underlying token, and the Gemini CLI's file is only updated when the switch is on.
+With it off, the renewed token is kept in memory until it expires rather than
+renewed on every refresh.
 
 ## Troubleshooting
 
@@ -225,8 +238,15 @@ shell's PATH (zsh, bash or fish) and in the usual install folders: Homebrew,
 `~/.local/bin`, npm, nvm, fnm, asdf, bun, volta and cargo. If yours lives elsewhere,
 add that folder to your PATH in your shell profile.
 
-**A row says "stale".** The last refresh failed, so the previous figures are shown
-with their age. After an HTTP 429 that provider is left alone for 15 minutes.
+**A row shows its figure in grey with "· old".** The last refresh failed, or the
+vendor sent nothing new, so the previous figures are shown with their age; the line
+underneath says which. After an HTTP 429 that provider is left alone for 15 minutes.
+
+**The keychain prompt keeps coming back, or a row says reading the keychain timed
+out.** Choose **Always Allow** when macOS asks whether "security" may use
+"Claude Code-credentials". Leeway waits up to five minutes for an answer on its first
+refresh and when you choose Refresh Now, and 20 seconds on its own five-minute
+refreshes, so an unanswered prompt doesn't hold up the other rows.
 
 **Launch at Login won't turn on.** Move the app to Applications and open it from
 there. macOS runs apps opened straight from Downloads or a disk image from a

@@ -1,5 +1,55 @@
 # Changelog
 
+## 1.1.0
+
+Codex, Muse Code, Grok Build and Claude Code reviewed 1.0.0 independently; every
+bug below was confirmed in the code first.
+
+- Old figures are shown as old: a grey "55% used · 2h old" instead of an orange
+  "stale", and they're never preferred over current figures as the menu bar's pick or
+  `best_available`'s choice. When the menu bar's pick is old, it says "· old".
+- Grok Bot: while the app is closed or its reading has expired, clicking the row
+  opens Grok Bot, which updates it.
+- The arrow keys reach rows that open something, and Return opens them.
+- On a first run, Leeway says what the keychain prompt is before macOS shows it. It
+  keeps Claude Code's sign-in in memory for up to an hour, so it asks the keychain far
+  less often, and an unanswered prompt holds up a timed refresh for 20 seconds rather
+  than five minutes.
+- "resetting…" instead of "back in now" in the minutes around a reset.
+- Warning text is a darker orange in light mode, so it's readable at small sizes.
+  Large on-demand amounts are shortened ("$1.2k/$5k") rather than overlapping the
+  percentage.
+- Refresh Now is greyed out while offline, and starting offline no longer shows an
+  error on every row.
+- For agents: while the menu bar app runs, the MCP server and `--json` answer from
+  its figures and never fetch or save their own, so they can't overwrite its figures
+  with an error or race it for a single-use sign-in. Agent processes never renew
+  sign-ins. New `figures_current`; `best_available` has `schema_version`, names
+  unknown providers in `unknown_providers`, and treats a filter of the wrong type as an
+  error. Figures over a week old are no longer dropped (Grok Bot's can be that old).
+- Fixed: Muse lost its figures and plan whenever Meta reported no usage; they're now
+  kept, marked as old.
+- Fixed: Muse showed "New window since Mon 2 Nov" because Leeway read the example
+  sentence in its own source code, which Muse had read while reviewing it, as a
+  real refusal. Only real refusals count now.
+- Fixed: a full 5-hour window was hidden behind "paying" when the weekly allowance
+  was also full, and "back in" could give the wrong time when both were full.
+- Fixed: a plain-text rate-limit reply from Claude skipped the 15-minute backoff; a
+  Claude sign-in with no expiry date always read as expired; an unrecognised Grok
+  reply read as 0% used; an unreadable Grok Bot reading wiped its figures; a Codex
+  limit with no stated length was called "0-day".
+- Fixed: Limit Alerts could fire at launch for changes made while Leeway was closed.
+- Fixed: Connect AI Tools froze the menu while it ran each tool's command.
+- Fixed: Claude's "couldn't save the renewed sign-in" warning was overwritten by its
+  usage breakdown, and Grok Bot could show an empty note row.
+- Fixed: with Renew Expired Sign-ins off, Gemini renewed its sign-in on every refresh.
+- Privacy: Muse's failure text and hints and Claude's renewal errors are masked like
+  other vendor text; debug output no longer prints free text such as error
+  descriptions; a rewritten credential file is always readable by you only, even if
+  it wasn't before; the saved figures file is never readable by others, even while
+  being written. The secret scan now names the image it finds something in.
+- The Renew Expired Sign-ins description now says it covers Gemini too.
+
 ## 1.0.0
 
 The first stable release. As with 0.3.0, Claude Code, Muse Code and Grok Build each
